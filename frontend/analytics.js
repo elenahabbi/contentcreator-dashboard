@@ -7,7 +7,10 @@ let platformData = [];
 let trendData = [];
 let metricsData = [];
 
-let trendChart = null;     // Chart.js instance
+let followerData = null;   // from GET /api/analytics/followers
+
+let trendChart = null;      // Chart.js instance
+let subscriberChart = null; // Chart.js instance
 
 // ============================================
 // INIT
@@ -16,6 +19,9 @@ let trendChart = null;     // Chart.js instance
 document.addEventListener("DOMContentLoaded", () => {
     const refreshBtn = document.getElementById("refreshBtn");
     if (refreshBtn) refreshBtn.addEventListener("click", loadAnalytics);
+
+    const syncSubscribersBtn = document.getElementById("syncSubscribersBtn");
+    if (syncSubscribersBtn) syncSubscribersBtn.addEventListener("click", syncSubscribers);
 
     loadAnalytics();
 });
@@ -29,12 +35,13 @@ async function loadAnalytics() {
     clearPageError();
 
     try {
-        const [summaryRes, topRes, platformRes, trendRes, metricsRes] = await Promise.all([
+        const [summaryRes, topRes, platformRes, trendRes, metricsRes, followersRes] = await Promise.all([
             fetch(`${API_BASE}/analytics/summary`),
             fetch(`${API_BASE}/analytics/top-content`),
             fetch(`${API_BASE}/analytics/platform-performance`),
             fetch(`${API_BASE}/analytics/performance-over-time`),
             fetch(`${API_BASE}/performance-metrics`),
+            fetch(`${API_BASE}/api/analytics/followers`),
         ]);
 
         summaryData = await expectOk(summaryRes, "Could not load the analytics summary.");
@@ -42,8 +49,10 @@ async function loadAnalytics() {
         platformData = await expectOk(platformRes, "Could not load platform performance.");
         trendData = await expectOk(trendRes, "Could not load the performance trend.");
         metricsData = await expectOk(metricsRes, "Could not load performance records.");
+        followerData = await expectOk(followersRes, "Could not load subscriber analytics.");
 
         renderSummary();
+        renderSubscribers();
         renderTrendChart();
         renderPlatformTable();
         renderTopContent();
@@ -97,6 +106,158 @@ function setMetricValue(elementId, rawValue) {
     // (e.g. 13,600) — compact K/M abbreviation is reserved for the chart axis,
     // where a little imprecision is fine but an exact KPI total is not.
     el.textContent = formatNumber(rawValue);
+}
+
+// ============================================
+// YOUTUBE SUBSCRIBERS
+// (GET /api/analytics/followers,
+//  POST /api/analytics/youtube/subscribers/sync)
+//
+// Subscriber counts are only ever written by the sync endpoint, which
+// reads them from the YouTube Data API — there is no input field here.
+// ============================================
+
+function renderSubscribers() {
+    const data = followerData || {};
+    const hasCurrent = data.currentSubscribers !== null && data.currentSubscribers !== undefined;
+
+    setText("kpiSubscribers", hasCurrent ? formatNumber(data.currentSubscribers) : "—");
+
+    // Growth needs two snapshots; until then it is N/A rather than a
+    // misleading zero.
+    const growth = data.subscriberGrowth;
+    setText(
+        "kpiSubscriberGrowth",
+        growth === null || growth === undefined
+            ? "N/A"
+            : `${growth > 0 ? "+" : ""}${formatNumber(growth)}`
+    );
+
+    const rate = data.growthRate;
+    setText(
+        "kpiSubscriberGrowthRate",
+        rate === null || rate === undefined ? "N/A" : `${rate > 0 ? "+" : ""}${rate}%`
+    );
+
+    const statusEl = document.getElementById("subscriberStatus");
+    if (statusEl && !statusEl.textContent && data.lastSyncedAt) {
+        setSubscriberStatus(`Last synced ${formatDateTime(data.lastSyncedAt)}.`, "");
+    }
+
+    renderSubscriberChart(Array.isArray(data.history) ? data.history : []);
+}
+
+function renderSubscriberChart(history) {
+    const canvas = document.getElementById("subscriberChart");
+    const emptyState = document.getElementById("subscriberEmpty");
+    if (!canvas) return;
+
+    // One point is not a trend — no history is invented to fill the gap.
+    if (history.length < 2) {
+        canvas.style.display = "none";
+        if (emptyState) emptyState.style.display = "block";
+        if (subscriberChart) {
+            subscriberChart.destroy();
+            subscriberChart = null;
+        }
+        return;
+    }
+
+    canvas.style.display = "block";
+    if (emptyState) emptyState.style.display = "none";
+
+    const labels = history.map(row => formatDateTime(row.recorded_at));
+    const counts = history.map(row => Number(row.follower_count) || 0);
+
+    if (subscriberChart) {
+        subscriberChart.data.labels = labels;
+        subscriberChart.data.datasets[0].data = counts;
+        subscriberChart.update();
+        return;
+    }
+
+    subscriberChart = new Chart(canvas.getContext("2d"), {
+        type: "line",
+        data: {
+            labels,
+            datasets: [{
+                label: "Subscribers",
+                data: counts,
+                borderColor: "#CD201F",
+                backgroundColor: "rgba(205, 32, 31, 0.12)",
+                borderWidth: 2,
+                tension: 0.25,
+                pointRadius: 3,
+                pointBackgroundColor: "#CD201F",
+                fill: true,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => `${formatNumber(ctx.parsed.y)} subscribers`,
+                    },
+                },
+            },
+            scales: {
+                x: { grid: { display: false }, ticks: { color: "#7a6f6f" } },
+                y: {
+                    grid: { color: "#f0e1d4" },
+                    ticks: { color: "#7a6f6f", callback: (value) => formatCompactNumber(value) },
+                },
+            },
+        },
+    });
+}
+
+async function syncSubscribers() {
+    const button = document.getElementById("syncSubscribersBtn");
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Syncing…";
+    }
+    setSubscriberStatus("Retrieving your subscriber count from YouTube…", "");
+
+    try {
+        const response = await fetch(`${API_BASE}/api/analytics/youtube/subscribers/sync`, {
+            method: "POST",
+        });
+        const body = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+            throw new Error(body.message || "Could not sync your YouTube subscribers.");
+        }
+
+        const count = body.follower_metric ? body.follower_metric.follower_count : null;
+        setSubscriberStatus(
+            body.deduplicated
+                ? "Already up to date — this count was recorded moments ago."
+                : `Recorded ${formatNumber(count)} subscribers from YouTube.`,
+            "ok"
+        );
+
+        await loadAnalytics();
+    } catch (error) {
+        console.error("Subscriber sync error:", error);
+        setSubscriberStatus(error.message || "Could not sync your YouTube subscribers.", "error");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = "Sync YouTube Subscribers";
+        }
+    }
+}
+
+function setSubscriberStatus(message, state) {
+    const el = document.getElementById("subscriberStatus");
+    if (!el) return;
+    el.textContent = message;
+    el.classList.remove("ok", "error");
+    if (state) el.classList.add(state);
 }
 
 // ============================================

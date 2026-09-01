@@ -676,6 +676,12 @@ app.put("/performance-metrics/:id", (req, res) => res.status(405).json(MANUAL_EN
 // returned instead of inserting a duplicate.
 const SYNC_DEDUPE_SECONDS = 60;
 
+// recorded_at comes back as a MySQL datetime string (dateStrings: true).
+function secondsSince(recordedAt) {
+  const timestamp = new Date(String(recordedAt).replace(" ", "T")).getTime();
+  return Number.isFinite(timestamp) ? (Date.now() - timestamp) / 1000 : Infinity;
+}
+
 app.post(
   "/performance-metrics/sync/:scheduleId",
   asyncHandler(async (req, res) => {
@@ -754,8 +760,7 @@ app.post(
       latest.views === views &&
       latest.likes === likes &&
       latest.comments === comments &&
-      (Date.now() - new Date(latest.recorded_at.replace(" ", "T")).getTime()) / 1000 <
-        SYNC_DEDUPE_SECONDS;
+      secondsSince(latest.recorded_at) < SYNC_DEDUPE_SECONDS;
 
     let metricId;
     if (isDuplicate) {
@@ -797,9 +802,7 @@ app.post(
 // exists the route explains what to run rather than failing obscurely.
 // =======================================================================
 
-app.post(
-  "/follower-metrics/sync/youtube",
-  asyncHandler(async (req, res) => {
+const syncYoutubeSubscribers = asyncHandler(async (req, res) => {
     let userRows;
     try {
       [userRows] = await db.query(
@@ -853,11 +856,36 @@ app.post(
       });
     }
 
-    const [result] = await db.query(
-      `INSERT INTO follower_metrics (user_id, platform_id, recorded_at, follower_count)
-       VALUES (?, ?, NOW(), ?)`,
-      [DEFAULT_USER_ID, platformRows[0].platform_id, channel.subscribers]
+    const platformId = platformRows[0].platform_id;
+
+    // Same rule as the video sync: repeated clicks must not litter the
+    // growth history with identical rows seconds apart.
+    const [latestRows] = await db.query(
+      `SELECT follower_metric_id, follower_count, recorded_at
+       FROM follower_metrics
+       WHERE user_id = ? AND platform_id = ?
+       ORDER BY recorded_at DESC, follower_metric_id DESC
+       LIMIT 1`,
+      [DEFAULT_USER_ID, platformId]
     );
+
+    const latest = latestRows[0];
+    const isDuplicate =
+      latest &&
+      latest.follower_count === channel.subscribers &&
+      secondsSince(latest.recorded_at) < SYNC_DEDUPE_SECONDS;
+
+    let followerMetricId;
+    if (isDuplicate) {
+      followerMetricId = latest.follower_metric_id;
+    } else {
+      const [result] = await db.query(
+        `INSERT INTO follower_metrics (user_id, platform_id, recorded_at, follower_count)
+         VALUES (?, ?, NOW(), ?)`,
+        [DEFAULT_USER_ID, platformId, channel.subscribers]
+      );
+      followerMetricId = result.insertId;
+    }
 
     const [rows] = await db.query(
       `SELECT fm.follower_metric_id, fm.user_id, fm.platform_id, p.platform_name,
@@ -865,15 +893,73 @@ app.post(
        FROM follower_metrics fm
        JOIN platforms p ON p.platform_id = fm.platform_id
        WHERE fm.follower_metric_id = ?`,
-      [result.insertId]
+      [followerMetricId]
     );
 
-    res.status(201).json({
+    res.status(isDuplicate ? 200 : 201).json({
       follower_metric: rows[0],
       source: { platform: "youtube", channel_id: channelId, channel_title: channel.title },
+      deduplicated: Boolean(isDuplicate),
     });
-  })
-);
+});
+
+app.post("/follower-metrics/sync/youtube", syncYoutubeSubscribers);
+// Longer, self-describing alias used by the analytics page.
+app.post("/api/analytics/youtube/subscribers/sync", syncYoutubeSubscribers);
+
+// SUBSCRIBER ANALYTICS
+// Current/previous counts, growth and the full snapshot history for the
+// chart. Growth is null (rendered as "N/A") until a second snapshot
+// exists — it is never estimated.
+const followerAnalytics = asyncHandler(async (req, res) => {
+  const [platformRows] = await db.query(
+    "SELECT platform_id FROM platforms WHERE LOWER(platform_name) = 'youtube'"
+  );
+  if (platformRows.length === 0) {
+    return res.status(400).json({ message: "No 'YouTube' row exists in the platforms table." });
+  }
+
+  const [history] = await db.query(
+    `SELECT follower_metric_id, recorded_at, follower_count
+     FROM follower_metrics
+     WHERE user_id = ? AND platform_id = ?
+     ORDER BY recorded_at ASC, follower_metric_id ASC`,
+    [DEFAULT_USER_ID, platformRows[0].platform_id]
+  );
+
+  const current = history.length > 0 ? history[history.length - 1] : null;
+  const previous = history.length > 1 ? history[history.length - 2] : null;
+
+  const currentSubscribers = current ? current.follower_count : null;
+  const previousSubscribers = previous ? previous.follower_count : null;
+
+  const subscriberGrowth =
+    currentSubscribers !== null && previousSubscribers !== null
+      ? currentSubscribers - previousSubscribers
+      : null;
+
+  // Guard against dividing by zero on a brand-new channel.
+  const growthRate =
+    subscriberGrowth !== null && previousSubscribers > 0
+      ? Math.round((subscriberGrowth / previousSubscribers) * 10000) / 100
+      : null;
+
+  res.json({
+    platform: "youtube",
+    currentSubscribers,
+    previousSubscribers,
+    subscriberGrowth,
+    growthRate,
+    lastSyncedAt: current ? current.recorded_at : null,
+    history: history.map((row) => ({
+      recorded_at: row.recorded_at,
+      follower_count: row.follower_count,
+    })),
+  });
+});
+
+app.get("/analytics/followers", followerAnalytics);
+app.get("/api/analytics/followers", followerAnalytics);
 
 app.delete(
   "/performance-metrics/:id",

@@ -826,3 +826,42 @@ ANALYTICS SOURCE NOTICE
   border-left: 4px solid #8D93CB;
   border-radius: 6px;
 }
+
+
+/* =========================
+YOUTUBE SUBSCRIBERS (analytics page)
+========================= */
+
+.subscriber-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.subscriber-status {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: #7a6f6f;
+  min-height: 16px;
+}
+
+.subscriber-status.ok {
+  color: #3a449b;
+}
+
+.subscriber-status.error {
+  color: #CD201F;
+}
+
+#syncSubscribersBtn:hover {
+  background-color: #CD201F;
+  border-color: #CD201F;
+  color: #fff6ee;
+}
+
+@media (max-width: 650px) {
+  .subscriber-grid {
+    grid-template-columns: 1fr;
+  }
+}

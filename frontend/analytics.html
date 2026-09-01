@@ -298,6 +298,41 @@
                 </div>
             </div>
 
+            <!-- YOUTUBE SUBSCRIBERS -->
+            <section class="analytics-card">
+                <div class="analytics-card-header">
+                    <div>
+                        <h3>YouTube Subscribers</h3>
+                        <p>Retrieved from YouTube for the channel configured on your account — never typed in.</p>
+                    </div>
+                    <button id="syncSubscribersBtn" type="button">Sync YouTube Subscribers</button>
+                </div>
+
+                <p id="subscriberStatus" class="subscriber-status"></p>
+
+                <div class="subscriber-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Current Subscribers</div>
+                        <div class="metric-value" id="kpiSubscribers">—</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Growth Since Last Sync</div>
+                        <div class="metric-value" id="kpiSubscriberGrowth">—</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">Growth Rate</div>
+                        <div class="metric-value" id="kpiSubscriberGrowthRate">—</div>
+                    </div>
+                </div>
+
+                <div class="chart-wrap">
+                    <canvas id="subscriberChart"></canvas>
+                    <div id="subscriberEmpty" class="empty-state" style="display:none;">
+                        Subscriber history will appear after multiple syncs.
+                    </div>
+                </div>
+            </section>
+
             <!-- PERFORMANCE OVER TIME -->
             <section class="analytics-card">
                 <h3>Performance Over Time</h3>
