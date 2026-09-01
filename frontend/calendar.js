@@ -139,9 +139,12 @@ function loadScheduledContent() {
                     return;
                 }
                 const key = `${item.content_id}_${item.scheduled_date}`;
-                if (!grouped[key]) grouped[key] = { ...item, platform_names: [] };
+                if (!grouped[key]) grouped[key] = { ...item, platform_names: [], rows: [] };
                 grouped[key].platform_names.push(item.platform_name);
                 grouped[key].schedule_ids = [...(grouped[key].schedule_ids || []), item.schedule_id];
+                // keep the per-platform rows: linking a published video needs
+                // the schedule_id of the YouTube row specifically
+                grouped[key].rows.push(item);
             });
 
             const todayDate = new Date();
@@ -379,6 +382,8 @@ function openScheduledModal(item) {
         return `<span style="padding:2px 6px; margin-right:4px; border-radius:4px; font-size:11px;">${p}</span>`;
     }).join("");
 
+    renderYoutubeSection(item);
+
     fetch(`http://localhost:3000/scripts?content_id=${item.content_id}`)
         .then(res => res.json())
         .then(scripts => {
@@ -400,6 +405,116 @@ function openScheduledModal(item) {
 
 document.getElementById("closeModal").onclick = () => {
     document.getElementById("eventModal").style.display = "none";
+};
+
+/* ---------------------------------------------------------------------
+   PUBLISHED YOUTUBE VIDEO — link + automatic analytics sync
+
+   The creator only supplies a link to content they already published.
+   Views/likes/comments are always retrieved by the backend from the
+   YouTube Data API; they are never entered here.
+--------------------------------------------------------------------- */
+
+// The scheduled_content row for YouTube inside the currently open group.
+let currentYoutubeRow = null;
+
+function renderYoutubeSection(item) {
+    const section = document.getElementById("youtubeLinkSection");
+    const input = document.getElementById("youtubeUrlInput");
+    if (!section) return;
+
+    currentYoutubeRow = (item.rows || []).find(
+        row => row.platform_name?.toLowerCase() === "youtube"
+    ) || null;
+
+    if (!currentYoutubeRow) {
+        section.classList.remove("active");
+        return;
+    }
+
+    section.classList.add("active");
+    input.value = currentYoutubeRow.external_content_url || "";
+    setYoutubeStatus(
+        currentYoutubeRow.external_content_id
+            ? `Linked to video ${currentYoutubeRow.external_content_id}.`
+            : "No video linked yet.",
+        ""
+    );
+}
+
+function setYoutubeStatus(message, state) {
+    const status = document.getElementById("youtubeLinkStatus");
+    if (!status) return;
+    status.textContent = message;
+    status.className = `youtube-link-status${state ? ` ${state}` : ""}`;
+}
+
+async function readError(response, fallback) {
+    const body = await response.json().catch(() => ({}));
+    return new Error(body.message || fallback);
+}
+
+document.getElementById("saveYoutubeLink").onclick = async () => {
+    if (!currentYoutubeRow) return;
+
+    const url = document.getElementById("youtubeUrlInput").value.trim();
+    setYoutubeStatus("Saving link…", "");
+
+    try {
+        const res = await fetch(
+            `http://localhost:3000/scheduled-content/${currentYoutubeRow.schedule_id}/link`,
+            {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ url })
+            }
+        );
+        if (!res.ok) throw await readError(res, "Could not save this link.");
+
+        const updated = await res.json();
+        currentYoutubeRow = { ...currentYoutubeRow, ...updated };
+        document.getElementById("youtubeUrlInput").value = updated.external_content_url || "";
+
+        setYoutubeStatus(
+            updated.external_content_id
+                ? `Linked to video ${updated.external_content_id}. Click "Sync Analytics" to retrieve its statistics.`
+                : "Link removed.",
+            "ok"
+        );
+        loadScheduledContent();
+    } catch (err) {
+        setYoutubeStatus(err.message, "error");
+    }
+};
+
+document.getElementById("syncYoutubeMetrics").onclick = async () => {
+    if (!currentYoutubeRow) return;
+
+    const button = document.getElementById("syncYoutubeMetrics");
+    button.disabled = true;
+    setYoutubeStatus("Retrieving statistics from YouTube…", "");
+
+    try {
+        const res = await fetch(
+            `http://localhost:3000/performance-metrics/sync/${currentYoutubeRow.schedule_id}`,
+            { method: "POST" }
+        );
+        if (!res.ok) throw await readError(res, "Could not sync analytics.");
+
+        const result = await res.json();
+        const metric = result.metric || {};
+        setYoutubeStatus(
+            `${Number(metric.views || 0).toLocaleString("en-US")} views · ` +
+            `${Number(metric.likes || 0).toLocaleString("en-US")} likes · ` +
+            `${Number(metric.comments || 0).toLocaleString("en-US")} comments ` +
+            `(recorded ${metric.recorded_at}). Shares are not provided by the YouTube API.`,
+            "ok"
+        );
+    } catch (err) {
+        setYoutubeStatus(err.message, "error");
+    } finally {
+        button.disabled = false;
+    }
 };
 
 /* EDIT */

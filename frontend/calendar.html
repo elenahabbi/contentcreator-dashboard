@@ -150,6 +150,22 @@
         <p style="font-weight:bold;">Script Content:</p>
         <p id="modalScript"></p>
 
+        <!-- Published YouTube video: link it once, then analytics are
+             retrieved automatically from the YouTube Data API. -->
+        <div id="youtubeLinkSection" class="youtube-link-section">
+            <p class="youtube-link-title">Published YouTube video</p>
+            <p class="youtube-link-hint">
+                Paste the link to your published video. Views, likes and comments are then
+                retrieved from YouTube — never typed in by hand.
+            </p>
+            <input id="youtubeUrlInput" type="url" placeholder="https://www.youtube.com/watch?v=…">
+            <div class="youtube-link-actions">
+                <button type="button" id="saveYoutubeLink">Save Link</button>
+                <button type="button" id="syncYoutubeMetrics">Sync Analytics</button>
+            </div>
+            <p id="youtubeLinkStatus" class="youtube-link-status"></p>
+        </div>
+
         <!-- Edit form, hidden until "Edit" is clicked -->
         <div id="modalEditForm" style="display:none; margin-top:8px;">
             <input id="modalEditDate" type="date">

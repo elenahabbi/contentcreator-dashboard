@@ -221,65 +221,6 @@
             pointer-events: none;
         }
 
-        /* ---- Add/Edit metric modal (wider variant of the shared .modal) ---- */
-        .metric-modal-content {
-            background: #fff6ee;
-            margin: 6% auto;
-            padding: 24px;
-            width: 90%;
-            max-width: 480px;
-            border-radius: 10px;
-        }
-
-        .modal.active {
-            display: block;
-        }
-
-        .modal {
-            display: none;
-        }
-
-        .metric-form {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            margin-top: 10px;
-        }
-
-        .metric-form label {
-            font-size: 13px;
-            font-weight: 600;
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-        }
-
-        .metric-form select,
-        .metric-form input {
-            padding: 9px 10px;
-            font-size: 14px;
-            font-weight: 400;
-        }
-
-        .metric-form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-        }
-
-        .metric-form-error {
-            color: #CD201F;
-            font-size: 13px;
-            min-height: 16px;
-        }
-
-        .metric-form-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 8px;
-            margin-top: 6px;
-        }
-
         @media (max-width: 1100px) {
             .analytics-grid {
                 grid-template-columns: repeat(3, 1fr);
@@ -289,10 +230,6 @@
         @media (max-width: 650px) {
             .analytics-grid {
                 grid-template-columns: repeat(2, 1fr);
-            }
-
-            .metric-form-row {
-                grid-template-columns: 1fr;
             }
 
             .top-content-item {
@@ -330,7 +267,7 @@
             <div class="analytics-toolbar">
                 <div>
                     <h3 style="margin:0;">Content performance overview</h3>
-                    <p>Real performance data pulled from your recorded metrics.</p>
+                    <p>Real performance data retrieved automatically from the platform APIs.</p>
                 </div>
                 <button id="refreshBtn" type="button">Refresh</button>
             </div>
@@ -369,7 +306,7 @@
                     <canvas id="trendChart"></canvas>
                     <div id="trendEmpty" class="empty-state" style="display:none;">
                         No performance data available yet.<br>
-                        Add performance data to begin analysing your content.
+                        Sync a published video to begin analysing your content.
                     </div>
                 </div>
             </section>
@@ -394,7 +331,7 @@
                     </table>
                     <div id="platformEmpty" class="empty-state" style="display:none;">
                         No performance data available yet.<br>
-                        Add performance data to begin analysing your content.
+                        Sync a published video to begin analysing your content.
                     </div>
                 </div>
             </section>
@@ -413,10 +350,15 @@
                 <div class="analytics-card-header">
                     <div>
                         <h3>Performance Data</h3>
-                        <p>Add, edit, or remove the performance records analytics is built from.</p>
+                        <p>Snapshots retrieved from the platform APIs, newest first.</p>
                     </div>
-                    <button id="addMetricBtn" type="button">+ Add Metric</button>
                 </div>
+                <p class="analytics-source-note">
+                    Performance figures are retrieved automatically from the platform's own API.
+                    To record a new snapshot, open the item in the Content Planner, link its
+                    published YouTube video and choose “Sync Analytics”.
+                    YouTube does not publish a share count, so shares stay at 0 for YouTube content.
+                </p>
                 <div class="table-wrap">
                     <table class="analytics-table">
                         <thead>
@@ -436,63 +378,12 @@
                     </table>
                     <div id="metricsEmpty" class="empty-state" style="display:none;">
                         No performance data available yet.<br>
-                        Click "+ Add Metric" to record your first performance data point.
+                        Link a published video in the Content Planner and sync it to record your first snapshot.
                     </div>
                 </div>
             </section>
 
         </main>
-    </div>
-</div>
-
-<!-- ADD / EDIT METRIC MODAL -->
-<div id="metricModal" class="modal">
-    <div class="metric-modal-content">
-        <div class="event-header">
-            <h3 id="metricModalTitle">Add Performance Metric</h3>
-            <button type="button" id="closeMetricModal">X</button>
-        </div>
-
-        <form id="metricForm" class="metric-form">
-            <label>
-                Content
-                <select id="metricContent" required></select>
-            </label>
-
-            <label>
-                Platform
-                <select id="metricPlatform" required></select>
-            </label>
-
-            <div class="metric-form-row">
-                <label>
-                    Views
-                    <input type="number" id="metricViews" min="0" step="1" required>
-                </label>
-                <label>
-                    Likes
-                    <input type="number" id="metricLikes" min="0" step="1" required>
-                </label>
-            </div>
-
-            <div class="metric-form-row">
-                <label>
-                    Comments
-                    <input type="number" id="metricComments" min="0" step="1" required>
-                </label>
-                <label>
-                    Shares
-                    <input type="number" id="metricShares" min="0" step="1" required>
-                </label>
-            </div>
-
-            <div id="metricFormError" class="metric-form-error"></div>
-
-            <div class="metric-form-actions">
-                <button type="button" id="cancelMetricForm">Cancel</button>
-                <button type="submit" id="saveMetricBtn">Save</button>
-            </div>
-        </form>
     </div>
 </div>
 

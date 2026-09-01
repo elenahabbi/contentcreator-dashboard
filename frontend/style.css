@@ -742,3 +742,87 @@ VIEWSCRIPTS
   display: flex;
   gap: 10px; /* space between edit & delete */
 }
+
+/* =========================
+PUBLISHED YOUTUBE VIDEO (calendar modal)
+========================= */
+
+.youtube-link-section {
+  display: none;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #98989d;
+}
+
+.youtube-link-section.active {
+  display: block;
+}
+
+.youtube-link-title {
+  margin: 0 0 4px;
+  font-weight: bold;
+}
+
+.youtube-link-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #7a6f6f;
+}
+
+#youtubeUrlInput {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+  border-radius: 6px;
+  border: 1px solid #FBA9C4;
+  background-color: #fff6ee;
+  color: #313135;
+}
+
+.youtube-link-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.youtube-link-actions button {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+#syncYoutubeMetrics:hover {
+  background-color: #CD201F;
+  border-color: #CD201F;
+  color: #fff6ee;
+}
+
+.youtube-link-status {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #7a6f6f;
+  min-height: 16px;
+}
+
+.youtube-link-status.ok {
+  color: #3a449b;
+}
+
+.youtube-link-status.error {
+  color: #CD201F;
+}
+
+
+/* =========================
+ANALYTICS SOURCE NOTICE
+========================= */
+
+.analytics-source-note {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #7a6f6f;
+  background: #f9efe4;
+  border-left: 4px solid #8D93CB;
+  border-radius: 6px;
+}
