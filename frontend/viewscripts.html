@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>View Script</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="write-container">
+
+    <button id="closeScriptBtn">← Back</button>
+
+    <div class="write-header">
+        <h1 id="viewTitle">Script Title</h1>
+        <p id="viewMeta">Platform • Status</p>
+    </div>
+
+    <div class="write-card">
+
+        <div id="viewContent" class="view-content">
+            Script content goes here...
+        </div>
+
+        <div class="write-actions">
+            <p id="viewFolder"></p>
+            <p id="viewEvents"></p>
+
+            <div class="action-buttons">
+            <button class="expand-button" id="deleteBtn">
+                <img src="button icons/pinkTrash.png" alt="" class="button-icon">
+                <span class="button-icon-text">
+                Delete
+                </span>
+            </button>
+
+            <button class="expand-button" id="editBtn">
+                <img src="button icons/pencil.png" alt="" class="button-icon"> 
+                <span class="button-icon-text">
+                Edit 
+                </span>
+            </button>
+            
+        </div>
+        </div>
+
+    </div>
+
+</div>
+
+<script src="viewscripts.js"></script>
+</body>
+</html>

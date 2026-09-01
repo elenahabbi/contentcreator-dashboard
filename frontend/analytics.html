@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analytics | ContentCreator</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+
+    <!-- Analytics-page-only styles. Reuses the app's existing colours,
+         card, table, button and modal conventions from style.css. -->
+    <style>
+        .analytics-page {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .analytics-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 4px;
+        }
+
+        .analytics-toolbar p {
+            margin: 4px 0 0;
+            color: #7a6f6f;
+            font-size: 14px;
+        }
+
+        .analytics-error {
+            display: none;
+            padding: 12px 14px;
+            border: 1px solid #CD201F;
+            background: #fff0ef;
+            color: #7a1a19;
+            font-size: 13px;
+        }
+
+        /* ---- KPI cards ---- */
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 10px;
+        }
+
+        .metric-card {
+            background: #fff6ee;
+            border: 1px solid #98989d;
+            padding: 18px;
+            min-height: 92px;
+            box-sizing: border-box;
+        }
+
+        .metric-label {
+            font-size: 13px;
+            color: #7a6f6f;
+            margin-bottom: 10px;
+        }
+
+        .metric-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #313135;
+            cursor: default;
+        }
+
+        /* ---- Generic section card ---- */
+        .analytics-card {
+            background: #fff6ee;
+            border: 1px solid #98989d;
+            padding: 18px;
+            min-width: 0;
+            border-radius: 8px;
+        }
+
+        .analytics-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 5px;
+            flex-wrap: wrap;
+        }
+
+        .analytics-card h3 {
+            margin: 0 0 5px;
+            font-size: 17px;
+        }
+
+        .analytics-card > p, .analytics-card-header p {
+            margin: 0 0 14px;
+            color: #7a6f6f;
+            font-size: 13px;
+        }
+
+        /* ---- Chart ---- */
+        .chart-wrap {
+            width: 100%;
+            height: 260px;
+            position: relative;
+        }
+
+        /* ---- Platform / metrics tables ---- */
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        .analytics-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .analytics-table th,
+        .analytics-table td {
+            padding: 10px 8px;
+            text-align: left;
+            border-bottom: 1px solid #98989d;
+            white-space: nowrap;
+        }
+
+        .analytics-table th {
+            color: #7a6f6f;
+            font-weight: 600;
+        }
+
+        .platform-pill {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            background: #f0e1d4;
+        }
+
+        .metrics-actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .metrics-actions button {
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+
+        .delete-metric-btn:hover {
+            background-color: #CD201F;
+            border-color: #CD201F;
+            color: #fff6ee;
+        }
+
+        /* ---- Top performing content ---- */
+        .top-content-item {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 12px 14px;
+            border-left: 4px solid #8D93CB;
+            background: #f9efe4;
+            margin-bottom: 8px;
+        }
+
+        .top-content-item.top-content-first {
+            border-left-color: #FBA9C4;
+            background: #fdeef4;
+        }
+
+        .top-content-rank {
+            font-size: 18px;
+            font-weight: 700;
+            color: #7a6f6f;
+            min-width: 28px;
+        }
+
+        .top-content-first .top-content-rank {
+            color: #d14976;
+        }
+
+        .top-content-body {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .top-content-title {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .top-content-meta {
+            font-size: 12px;
+            color: #7a6f6f;
+        }
+
+        .top-content-engagement {
+            font-size: 18px;
+            font-weight: 700;
+            text-align: right;
+            color: #313135;
+            white-space: nowrap;
+        }
+
+        .top-content-engagement-label {
+            display: block;
+            font-size: 11px;
+            font-weight: 400;
+            color: #7a6f6f;
+        }
+
+        .empty-state {
+            padding: 30px 10px;
+            text-align: center;
+            color: #7a6f6f;
+            font-size: 13px;
+        }
+
+        .loading {
+            opacity: .6;
+            pointer-events: none;
+        }
+
+        /* ---- Add/Edit metric modal (wider variant of the shared .modal) ---- */
+        .metric-modal-content {
+            background: #fff6ee;
+            margin: 6% auto;
+            padding: 24px;
+            width: 90%;
+            max-width: 480px;
+            border-radius: 10px;
+        }
+
+        .modal.active {
+            display: block;
+        }
+
+        .modal {
+            display: none;
+        }
+
+        .metric-form {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 10px;
+        }
+
+        .metric-form label {
+            font-size: 13px;
+            font-weight: 600;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .metric-form select,
+        .metric-form input {
+            padding: 9px 10px;
+            font-size: 14px;
+            font-weight: 400;
+        }
+
+        .metric-form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .metric-form-error {
+            color: #CD201F;
+            font-size: 13px;
+            min-height: 16px;
+        }
+
+        .metric-form-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 6px;
+        }
+
+        @media (max-width: 1100px) {
+            .analytics-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+
+        @media (max-width: 650px) {
+            .analytics-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .metric-form-row {
+                grid-template-columns: 1fr;
+            }
+
+            .top-content-item {
+                flex-wrap: wrap;
+            }
+
+            .top-content-engagement {
+                text-align: left;
+            }
+        }
+    </style>
+</head>
+
+<body>
+<div class="parent-all">
+
+    <div class="sidePanel">
+        <h2>ContentCreator</h2>
+        <ul>
+            <li><a href="dashboard.html">Dashboard</a></li>
+            <li><a href="calendar.html">Content Planner</a></li>
+            <li><a href="scripts.html">Scripts</a></li>
+            <li class="activeTab"><a href="analytics.html">Analytics</a></li>
+            <li><a href="reports.html">Reports</a></li>
+        </ul>
+    </div>
+
+    <div class="topPanel">
+        <h2>Analytics</h2>
+    </div>
+
+    <div class="bodyPanel">
+        <main class="analytics-page" id="analyticsPage">
+
+            <div class="analytics-toolbar">
+                <div>
+                    <h3 style="margin:0;">Content performance overview</h3>
+                    <p>Real performance data pulled from your recorded metrics.</p>
+                </div>
+                <button id="refreshBtn" type="button">Refresh</button>
+            </div>
+
+            <div id="analyticsError" class="analytics-error"></div>
+
+            <!-- KPI CARDS -->
+            <div class="analytics-grid">
+                <div class="metric-card">
+                    <div class="metric-label">Total Views</div>
+                    <div class="metric-value" id="kpiViews">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total Likes</div>
+                    <div class="metric-value" id="kpiLikes">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total Comments</div>
+                    <div class="metric-value" id="kpiComments">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total Shares</div>
+                    <div class="metric-value" id="kpiShares">—</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Avg. Engagement Rate</div>
+                    <div class="metric-value" id="kpiEngagement">—</div>
+                </div>
+            </div>
+
+            <!-- PERFORMANCE OVER TIME -->
+            <section class="analytics-card">
+                <h3>Performance Over Time</h3>
+                <p>Total views by day, across every recorded metric.</p>
+                <div class="chart-wrap">
+                    <canvas id="trendChart"></canvas>
+                    <div id="trendEmpty" class="empty-state" style="display:none;">
+                        No performance data available yet.<br>
+                        Add performance data to begin analysing your content.
+                    </div>
+                </div>
+            </section>
+
+            <!-- PLATFORM PERFORMANCE -->
+            <section class="analytics-card">
+                <h3>Platform Performance</h3>
+                <p>Totals and average engagement rate, grouped by platform.</p>
+                <div class="table-wrap">
+                    <table class="analytics-table">
+                        <thead>
+                            <tr>
+                                <th>Platform</th>
+                                <th>Views</th>
+                                <th>Likes</th>
+                                <th>Comments</th>
+                                <th>Shares</th>
+                                <th>Avg. Engagement Rate</th>
+                            </tr>
+                        </thead>
+                        <tbody id="platformTableBody"></tbody>
+                    </table>
+                    <div id="platformEmpty" class="empty-state" style="display:none;">
+                        No performance data available yet.<br>
+                        Add performance data to begin analysing your content.
+                    </div>
+                </div>
+            </section>
+
+            <!-- TOP PERFORMING CONTENT -->
+            <section class="analytics-card">
+                <h3>Top Performing Content</h3>
+                <p>Top 5 content items, ranked by engagement rate.</p>
+                <div id="topContent">
+                    <div class="empty-state">Loading top content…</div>
+                </div>
+            </section>
+
+            <!-- PERFORMANCE METRICS MANAGEMENT -->
+            <section class="analytics-card">
+                <div class="analytics-card-header">
+                    <div>
+                        <h3>Performance Data</h3>
+                        <p>Add, edit, or remove the performance records analytics is built from.</p>
+                    </div>
+                    <button id="addMetricBtn" type="button">+ Add Metric</button>
+                </div>
+                <div class="table-wrap">
+                    <table class="analytics-table">
+                        <thead>
+                            <tr>
+                                <th>Content</th>
+                                <th>Platform</th>
+                                <th>Views</th>
+                                <th>Likes</th>
+                                <th>Comments</th>
+                                <th>Shares</th>
+                                <th>Engagement Rate</th>
+                                <th>Recorded At</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="metricsTableBody"></tbody>
+                    </table>
+                    <div id="metricsEmpty" class="empty-state" style="display:none;">
+                        No performance data available yet.<br>
+                        Click "+ Add Metric" to record your first performance data point.
+                    </div>
+                </div>
+            </section>
+
+        </main>
+    </div>
+</div>
+
+<!-- ADD / EDIT METRIC MODAL -->
+<div id="metricModal" class="modal">
+    <div class="metric-modal-content">
+        <div class="event-header">
+            <h3 id="metricModalTitle">Add Performance Metric</h3>
+            <button type="button" id="closeMetricModal">X</button>
+        </div>
+
+        <form id="metricForm" class="metric-form">
+            <label>
+                Content
+                <select id="metricContent" required></select>
+            </label>
+
+            <label>
+                Platform
+                <select id="metricPlatform" required></select>
+            </label>
+
+            <div class="metric-form-row">
+                <label>
+                    Views
+                    <input type="number" id="metricViews" min="0" step="1" required>
+                </label>
+                <label>
+                    Likes
+                    <input type="number" id="metricLikes" min="0" step="1" required>
+                </label>
+            </div>
+
+            <div class="metric-form-row">
+                <label>
+                    Comments
+                    <input type="number" id="metricComments" min="0" step="1" required>
+                </label>
+                <label>
+                    Shares
+                    <input type="number" id="metricShares" min="0" step="1" required>
+                </label>
+            </div>
+
+            <div id="metricFormError" class="metric-form-error"></div>
+
+            <div class="metric-form-actions">
+                <button type="button" id="cancelMetricForm">Cancel</button>
+                <button type="submit" id="saveMetricBtn">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script src="analytics.js"></script>
+</body>
+</html>

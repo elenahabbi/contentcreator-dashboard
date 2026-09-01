@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="write-container">
+    <button id="closeScriptBtn">
+         Go back
+    </button>
+
+    <div class="write-header">
+        <h1>✍🏽 Create Script</h1>
+        <p>Let your ideas flow… no pressure.</p>
+    </div>
+
+    <div class="write-card">
+        <input type="text" id="title" placeholder="Give your script a title...">
+
+        <textarea id="content" placeholder="Start writing your script here..."></textarea>
+
+        <div class="write-actions">
+            <select id="folder">
+                <option value="short-form">Short Form</option>
+                <option value="long-form">Long Form</option>
+                <option value="carousel">Carousel</option>
+            </select>
+
+            <select id="status">
+                <option value="draft">Draft</option>
+                <option value="filmed">Filmed</option>
+                <option value="posted">Posted</option>
+            </select>
+
+            <button type="button" onclick="addScript()" id="saveScript">Save Script</button>
+
+
+    </div>
+
+</div>
+
+</div>
+
+<script src="scripts.js"></script>
+</body>
+</html>

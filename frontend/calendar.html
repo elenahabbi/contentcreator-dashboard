@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calendar</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="parent-all">
+    <div class="sidePanel">
+        <h2>ContentCreator</h2>
+        <ul>
+        <li><a href="dashboard.html">
+            Dashboard</a>
+        </li>
+        <li class="activeTab">
+            Calendar
+        </li>
+        <li><a href="scripts.html">
+            Scripts
+        </a>
+        </li>
+        <li>
+            <a href="analytics.html">
+            Analytics
+            </a>
+        </li>
+    </ul>
+    </div>
+
+    <div class="topPanel">
+        <h2>Calendar</h2>
+        
+    </div>
+
+    <div class="bodyPanel">
+        
+    <div class="parentCalendar">
+    <div class="month-week-toggle">
+        Month Week
+    </div>
+    <div class="dayDropdown">
+
+    <select id="month">
+        <option>Jan</option>
+        <option>Feb</option>
+        <option>Mar</option>
+        <option>Apr</option>
+        <option>May</option>
+        <option>Jun</option>
+        <option>Jul</option>
+        <option>Aug</option>
+        <option>Sep</option>
+        <option>Oct</option>
+        <option>Nov</option>
+        <option>Dec</option>
+    </select>
+
+    <select id="year">
+         
+         <option>2026</option>
+         <option>2027</option>
+         <option>2028</option>
+
+    </select>
+    </div>
+    <div class="addEvent">
+        <button id="openEvent">
+            + Add Event
+        </button>
+        <div class="event-sidebar">
+
+<div class="event-header">
+<h3 class="addEventTitle">Add Event</h3>
+<button id="closeEvent">X</button>
+</div>
+<input id="eventTitle" placeholder="Title">
+
+<input id="eventDate" type="date">
+
+<div id="eventPlatform">
+<label><input type="checkbox" value="tiktok"> TikTok</label>
+<label><input type="checkbox" value="youtube"> YouTube</label>
+<label><input type="checkbox" value="instagram"> Instagram</label>
+</div>
+
+<div class="script-section">
+
+<label>Add Script</label>
+
+<select id="scriptSelect">
+<option value="">No Script</option>
+</select>
+
+<button id="createScript">Create New Script</button>
+
+</div>
+
+<button id="saveEvent">Save Event</button>
+
+
+</div>
+    </div>
+    <div class="calendarBody">
+        <div class="calendar-header">
+        <div>Sun</div>
+        <div>Mon</div>
+        <div>Tue</div>
+        <div>Wed</div>
+        <div>Thu</div>
+        <div>Fri</div>
+        <div>Sat</div>
+    </div>
+
+    <div class="calendar-grid">
+        <!-- JS inserts days here -->
+         <div class="day">
+    <span class="date">12</span>
+        </div>
+    </div>
+    </div>
+    <div class="platformToggle">
+        <button class="allToggle">All</button>
+        <button class="youtubeToggle">YouTube</button>
+        <button class="tiktokToggle">TikTok</button>
+        <button class="instagramToggle">Instagram</button>
+
+    </div>
+    </div>
+    
+        <div id="eventModal" class="modal">
+    <div class="modal-content">
+
+        <!-- Top row -->
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <h3 id="modalEventTitle"></h3>
+            <span id="modalDate" style="font-size:12px; opacity:0.7;"></span>
+        </div>
+
+        <!-- Platforms -->
+        <div id="modalPlatforms" style="margin-bottom:8px;"></div>
+
+        <hr>
+
+        <!-- Script section -->
+        <p style="font-weight:bold;">Script Title:</p>
+        <p id="modalScriptTitle"></p>
+
+        <p style="font-weight:bold;">Script Content:</p>
+        <p id="modalScript"></p>
+
+        <!-- Edit form, hidden until "Edit" is clicked -->
+        <div id="modalEditForm" style="display:none; margin-top:8px;">
+            <input id="modalEditDate" type="date">
+            <div id="modalEditPlatform">
+                <label><input type="checkbox" value="tiktok"> TikTok</label>
+                <label><input type="checkbox" value="youtube"> YouTube</label>
+                <label><input type="checkbox" value="instagram"> Instagram</label>
+            </div>
+            <select id="modalEditStatus">
+                <option value="Scheduled">Scheduled</option>
+                <option value="Published">Published</option>
+            </select>
+            <button id="saveEditEvent">Save Changes</button>
+        </div>
+
+        <button id="editEvent">Edit</button>
+        <button id="publishEvent">Mark Published</button>
+        <button id="deleteEvent">Delete</button>
+        <button id="closeModal">Close</button>
+    </div>
+</div>
+
+    </div>
+
+    </div>
+    <script src="calendar.js"></script>
+
+
+</body>
+</html>

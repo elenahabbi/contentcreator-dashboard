@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Form</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    
+    
+<div class="parent-all">
+    <div class="sidePanel">
+        <h2>ContentCreator</h2>
+        <ul>
+        <li><a href="dashboard.html">
+            Dashboard</a>
+        </li>
+        <li ><a href="calendar.html">
+            Calendar
+            </a>
+        </li>
+        <li class="activeTab"><a href="scripts.html">
+            Scripts
+        </a>
+        </li>
+        <li ><a href="analytics.html">
+            Analytics
+        </a>
+        </li>
+    </ul>
+    </div>
+    <div class="topPanel">
+        <h2>Scripts</h2>
+    </div>
+    <div class="bodyPanel">
+
+        
+    <div class="parent-bodyPanel">
+        <div class="leftColumn">
+
+            
+<div class="bodyPanel-left-script">
+        <div class="longForm">
+            Long-Form Videos
+            <div class="preview"></div>
+        </div>
+    <div class="shortForm">
+        Short-Form Videos
+        <div class="preview"></div>
+    </div>
+</div>
+   
+
+<!-- Add this inside the parent-bodyPanel before the carousel div -->
+<div class="loading-indicator" style="display: none; text-align: center; padding: 20px;">
+    Loading scripts...
+</div>
+
+        </div>
+    <div class="carousel">
+        Carousel
+        <div class="preview"></div>
+    </div>
+    <div class="newFolder">
+        <button class="addFolder">
+            + Add Folder
+        </button>
+    </div>
+
+
+</div>
+<button id="addScriptBtn">
+  ✍🏽 Write Script
+</button>
+
+
+    </div>
+</div>
+
+
+
+
+    
+    <script src="scripts.js" defer></script>
+    
+
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    
+    
+<div class="parent-all">
+    <div class="sidePanel">
+        <h2>ContentCreator</h2>
+        <ul>
+        <li class="activeTab"><a href="dashboard.html">
+            Dashboard</a>
+        </li>
+        <li ><a href="calendar.html">
+            Content Planner
+            </a>
+        </li>
+        <li><a href="scripts.html">
+            Scripts
+        </a>
+        </li>
+        <li ><a href="analytics.html">
+            Analytics
+        </a>
+        </li>
+        <li ><a href="reports.html">
+            Reports
+        </a>
+        </li>
+    </ul>
+    </div>
+    <div class="topPanel">
+        <h2>Dashboard</h2>
+    </div>
+    <div class="bodyPanel">
+
+        
+    <div class="parent-bodyPanel">
+        <div class="leftColumn">
+            
+    <div class="bodyPanel-left">
+
+        <div class="followers-platformAnalytics">
+            Followers
+        </div>
+
+    <div class="youtube-platformAnalytics">
+        YouTube
+    </div>
+    <div class="impressions">
+        Impressions
+    </div>
+    <div class="lineGraph">
+        Line Graph
+    </div>
+</div>
+    
+
+        </div>
+    <div class="middleColumn">
+        
+    <div class="bodyPanel-right">
+        <div class="tiktok-platformAnalytics">
+            Tiktok
+        </div>
+    <div class="posts">
+        Posts
+    </div>
+    <div class="barGraph">
+        Bar Graph
+    </div>
+</div>
+    
+    </div>
+    <div class="rightColumn">
+        <div class="bodyPanel-right">
+        <div class="instagram-platformAnalytics">
+            Instagram
+        </div>
+    <div class="addScript">
+        Addscript
+        <button id="addScriptBtn">
+            + Add Script
+        </button>
+    </div>
+    <div class="pieChart">
+        Pie chart
+    </div>
+</div>
+    </div>
+</div>
+    
+
+    </div>
+</div>
+<div id="scriptForm" style="display:none;">
+
+    <input type="text" id="scriptInput" placeholder="Write your script idea">
+    
+    <button id="saveScript">Save</button>
+    </div>
+
+<div id="scriptList"></div>
+<script src="dashboard.js"></script>
+
+    
+
+</body>
+</html>
