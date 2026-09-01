@@ -4,6 +4,7 @@ require("dotenv").config();
 const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
+const youtubeService = require("./services/youtubeService");
 
 const app = express();
 
@@ -357,6 +358,7 @@ const SCHEDULED_SELECT = `
   SELECT
     sc.schedule_id, sc.content_id, sc.platform_id, sc.scheduled_date,
     sc.published_at, sc.status,
+    sc.external_content_id, sc.external_content_url,
     CASE
       WHEN sc.status = 'Scheduled' AND sc.scheduled_date < NOW() THEN 'Missed'
       ELSE sc.status
@@ -524,6 +526,76 @@ app.patch(
   })
 );
 
+// LINK PUBLISHED CONTENT TO ITS EXTERNAL PLATFORM POST
+// The creator pastes the URL of their published video; the platform's own
+// ID is derived from it. This is *not* manual analytics entry — no counts
+// are accepted here, only a pointer to the published content.
+// Send an empty url/external_content_id to unlink.
+app.patch(
+  "/scheduled-content/:id/link",
+  asyncHandler(async (req, res) => {
+    const scheduleId = Number(req.params.id);
+    if (!Number.isInteger(scheduleId) || scheduleId <= 0) {
+      return res.status(400).json({ message: "schedule_id must be a positive integer" });
+    }
+
+    const { url, external_content_url, external_content_id } = req.body || {};
+    const rawInput = url ?? external_content_url ?? external_content_id ?? "";
+
+    const [existing] = await db.query(
+      `SELECT sc.schedule_id, p.platform_name
+       FROM scheduled_content sc
+       JOIN platforms p ON p.platform_id = sc.platform_id
+       WHERE sc.schedule_id = ?`,
+      [scheduleId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: "Scheduled item not found" });
+    }
+
+    const platformName = String(existing[0].platform_name || "").toLowerCase();
+
+    // Unlink
+    if (typeof rawInput !== "string" || rawInput.trim() === "") {
+      await db.query(
+        "UPDATE scheduled_content SET external_content_id = NULL, external_content_url = NULL WHERE schedule_id = ?",
+        [scheduleId]
+      );
+      const [rows] = await db.query(`${SCHEDULED_SELECT} WHERE sc.schedule_id = ?`, [scheduleId]);
+      return res.json(rows[0]);
+    }
+
+    // Only YouTube is supported in this slice; other platforms get a clear
+    // message rather than storing an unusable reference.
+    if (platformName !== "youtube") {
+      return res.status(400).json({
+        message: `Linking published content is only supported for YouTube right now (this item is scheduled for ${existing[0].platform_name}).`,
+      });
+    }
+
+    const videoId = youtubeService.extractYouTubeVideoId(rawInput);
+    if (!videoId) {
+      return res.status(400).json({
+        message:
+          "That does not look like a YouTube video link. Use a youtube.com/watch?v=…, youtu.be/… or youtube.com/shorts/… URL.",
+      });
+    }
+
+    // Store the canonical watch URL when the creator pasted a bare ID.
+    const storedUrl = /^https?:\/\//i.test(rawInput.trim())
+      ? rawInput.trim().slice(0, 500)
+      : `https://www.youtube.com/watch?v=${videoId}`;
+
+    await db.query(
+      "UPDATE scheduled_content SET external_content_id = ?, external_content_url = ? WHERE schedule_id = ?",
+      [videoId, storedUrl, scheduleId]
+    );
+
+    const [rows] = await db.query(`${SCHEDULED_SELECT} WHERE sc.schedule_id = ?`, [scheduleId]);
+    res.json(rows[0]);
+  })
+);
+
 app.delete(
   "/scheduled-content/:id",
   asyncHandler(async (req, res) => {
@@ -558,33 +630,12 @@ const PERFORMANCE_SELECT = `
   JOIN platforms p ON p.platform_id = pm.platform_id
 `;
 
-// Every count field must be a non-negative integer. Missing/invalid values
-// are rejected outright (per spec: never silently coerce bad data to 0).
-function validateMetricCounts(body, { requireAll }) {
-  const fields = ["views", "likes", "comments", "shares"];
-  const errors = [];
-  const parsed = {};
-
-  for (const field of fields) {
-    const value = body[field];
-
-    if (value === undefined || value === null) {
-      if (requireAll) errors.push(`${field} is required`);
-      continue;
-    }
-    if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
-      errors.push(`${field} must be an integer`);
-      continue;
-    }
-    if (value < 0) {
-      errors.push(`${field} cannot be negative`);
-      continue;
-    }
-    parsed[field] = value;
-  }
-
-  return { errors, parsed };
-}
+// Performance metrics are sourced exclusively from platform APIs — the
+// creator never types their own counts (see /performance-metrics/sync/...).
+const MANUAL_ENTRY_DISABLED = {
+  message:
+    "Performance metrics can no longer be entered by hand. Link the published content and use POST /performance-metrics/sync/:scheduleId to retrieve genuine platform statistics.",
+};
 
 app.get(
   "/performance-metrics",
@@ -607,84 +658,308 @@ app.get(
   })
 );
 
+// Manual creation/editing of analytics is intentionally gone: the project
+// requires that the creator can never type their own performance figures.
+app.post("/performance-metrics", (req, res) => res.status(405).json(MANUAL_ENTRY_DISABLED));
+app.put("/performance-metrics/:id", (req, res) => res.status(405).json(MANUAL_ENTRY_DISABLED));
+
+// =======================================================================
+// PERFORMANCE METRICS — YOUTUBE SYNC
+// Retrieves genuine statistics from YouTube Data API v3 and stores them as
+// a new timestamped snapshot, so historical rows are preserved and the
+// existing analytics endpoints keep working unchanged.
+// =======================================================================
+
+// Two syncs seconds apart (double click, page refresh) would otherwise add
+// identical rows and distort "performance over time". If the newest
+// snapshot for this content+platform is under this age AND identical, it is
+// returned instead of inserting a duplicate.
+const SYNC_DEDUPE_SECONDS = 60;
+
+// recorded_at comes back as a MySQL datetime string (dateStrings: true).
+function secondsSince(recordedAt) {
+  const timestamp = new Date(String(recordedAt).replace(" ", "T")).getTime();
+  return Number.isFinite(timestamp) ? (Date.now() - timestamp) / 1000 : Infinity;
+}
+
 app.post(
-  "/performance-metrics",
+  "/performance-metrics/sync/:scheduleId",
   asyncHandler(async (req, res) => {
-    const { content_id, platform_id, recorded_at } = req.body || {};
-
-    if (!content_id || !platform_id) {
-      return res.status(400).json({ message: "content_id and platform_id are required" });
+    const scheduleId = Number(req.params.scheduleId);
+    if (!Number.isInteger(scheduleId) || scheduleId <= 0) {
+      return res.status(400).json({ message: "scheduleId must be a positive integer" });
     }
 
-    const { errors, parsed } = validateMetricCounts(req.body || {}, { requireAll: true });
-    if (errors.length > 0) {
-      return res.status(400).json({ message: "Invalid metric values", errors });
-    }
-
-    const [contentRows] = await db.query(
-      "SELECT content_id FROM content WHERE content_id = ?",
-      [content_id]
+    const [scheduleRows] = await db.query(
+      `SELECT sc.schedule_id, sc.content_id, sc.platform_id,
+              sc.external_content_id, sc.external_content_url,
+              p.platform_name, c.title AS content_title
+       FROM scheduled_content sc
+       JOIN platforms p ON p.platform_id = sc.platform_id
+       JOIN content c ON c.content_id = sc.content_id
+       WHERE sc.schedule_id = ?`,
+      [scheduleId]
     );
-    if (contentRows.length === 0) {
-      return res.status(400).json({ message: "content_id does not reference an existing content item" });
+
+    if (scheduleRows.length === 0) {
+      return res.status(404).json({ message: "Scheduled item not found" });
+    }
+
+    const schedule = scheduleRows[0];
+
+    if (String(schedule.platform_name || "").toLowerCase() !== "youtube") {
+      return res.status(400).json({
+        message: `Automatic analytics sync currently supports YouTube only (this item is scheduled for ${schedule.platform_name}).`,
+      });
+    }
+
+    // Prefer the stored ID; fall back to re-deriving it from the stored URL
+    // for rows linked before the ID was extracted.
+    const videoId =
+      youtubeService.extractYouTubeVideoId(schedule.external_content_id || "") ||
+      youtubeService.extractYouTubeVideoId(schedule.external_content_url || "");
+
+    if (!videoId) {
+      return res.status(400).json({
+        message:
+          "This scheduled item has no linked YouTube video yet. Add the published video's URL first, then sync.",
+      });
+    }
+
+    let stats;
+    try {
+      stats = await youtubeService.getVideoStatistics(videoId);
+    } catch (err) {
+      if (err instanceof youtubeService.YouTubeServiceError) {
+        // err.message is written to be safe to show a user and never
+        // contains the API key.
+        return res.status(err.status).json({ message: err.message, code: err.code });
+      }
+      throw err;
+    }
+
+    // performance_metrics counts are NOT NULL, so unavailable values (hidden
+    // likes, or shares which YouTube never exposes) are stored as 0. The
+    // response reports what was genuinely available so the UI can say so.
+    const views = stats.views ?? 0;
+    const likes = stats.likes ?? 0;
+    const comments = stats.comments ?? 0;
+
+    const [latestRows] = await db.query(
+      `SELECT metric_id, views, likes, comments, recorded_at
+       FROM performance_metrics
+       WHERE content_id = ? AND platform_id = ?
+       ORDER BY recorded_at DESC, metric_id DESC
+       LIMIT 1`,
+      [schedule.content_id, schedule.platform_id]
+    );
+
+    const latest = latestRows[0];
+    const isDuplicate =
+      latest &&
+      latest.views === views &&
+      latest.likes === likes &&
+      latest.comments === comments &&
+      secondsSince(latest.recorded_at) < SYNC_DEDUPE_SECONDS;
+
+    let metricId;
+    if (isDuplicate) {
+      metricId = latest.metric_id;
+    } else {
+      const [result] = await db.query(
+        `INSERT INTO performance_metrics (content_id, platform_id, recorded_at, views, likes, comments, shares)
+         VALUES (?, ?, NOW(), ?, ?, ?, 0)`,
+        [schedule.content_id, schedule.platform_id, views, likes, comments]
+      );
+      metricId = result.insertId;
+    }
+
+    const [rows] = await db.query(`${PERFORMANCE_SELECT} WHERE pm.metric_id = ?`, [metricId]);
+
+    res.status(isDuplicate ? 200 : 201).json({
+      metric: castNumbers(rows[0], ["engagement_rate"]),
+      source: {
+        platform: "youtube",
+        video_id: videoId,
+        video_title: stats.title,
+        schedule_id: schedule.schedule_id,
+      },
+      // Explicitly reported so the UI never implies these are real zeros.
+      unavailable: {
+        shares: stats.sharesUnavailableReason,
+        ...(stats.likes === null
+          ? { likes: "This video's like count is hidden by its owner." }
+          : {}),
+      },
+      deduplicated: Boolean(isDuplicate),
+    });
+  })
+);
+
+// =======================================================================
+// FOLLOWER METRICS — YOUTUBE SUBSCRIBER SYNC
+// Requires users.youtube_channel_id (migration 02). Until that column
+// exists the route explains what to run rather than failing obscurely.
+// =======================================================================
+
+const syncYoutubeSubscribers = asyncHandler(async (req, res) => {
+    let userRows;
+    try {
+      [userRows] = await db.query(
+        "SELECT user_id, youtube_channel_id FROM users WHERE user_id = ?",
+        [DEFAULT_USER_ID]
+      );
+    } catch (err) {
+      if (err.code === "ER_BAD_FIELD_ERROR") {
+        return res.status(503).json({
+          message:
+            "Subscriber sync needs the users.youtube_channel_id column. Run database/migrations/02_add_users_youtube_channel_id.sql first.",
+        });
+      }
+      throw err;
+    }
+
+    if (userRows.length === 0) {
+      return res.status(404).json({ message: "Default user not found" });
+    }
+
+    const channelId = youtubeService.extractYouTubeChannelId(
+      userRows[0].youtube_channel_id || ""
+    );
+    if (!channelId) {
+      return res.status(400).json({
+        message:
+          "No YouTube channel is configured for this creator. Set users.youtube_channel_id to the channel's UC… ID.",
+      });
     }
 
     const [platformRows] = await db.query(
-      "SELECT platform_id FROM platforms WHERE platform_id = ?",
-      [platform_id]
+      "SELECT platform_id FROM platforms WHERE LOWER(platform_name) = 'youtube'"
     );
     if (platformRows.length === 0) {
-      return res.status(400).json({ message: "platform_id does not reference an existing platform" });
+      return res.status(400).json({ message: "No 'YouTube' row exists in the platforms table." });
     }
 
-    const [result] = await db.query(
-      `INSERT INTO performance_metrics (content_id, platform_id, recorded_at, views, likes, comments, shares)
-       VALUES (?, ?, COALESCE(?, NOW()), ?, ?, ?, ?)`,
-      [content_id, platform_id, recorded_at || null, parsed.views, parsed.likes, parsed.comments, parsed.shares]
-    );
-
-    const [rows] = await db.query(`${PERFORMANCE_SELECT} WHERE pm.metric_id = ?`, [
-      result.insertId,
-    ]);
-    res.status(201).json(castNumbers(rows[0], ["engagement_rate"]));
-  })
-);
-
-app.put(
-  "/performance-metrics/:id",
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
-
-    const [existing] = await db.query(
-      "SELECT * FROM performance_metrics WHERE metric_id = ?",
-      [id]
-    );
-    if (existing.length === 0) {
-      return res.status(404).json({ message: "Performance metric not found" });
+    let channel;
+    try {
+      channel = await youtubeService.getChannelStatistics(channelId);
+    } catch (err) {
+      if (err instanceof youtubeService.YouTubeServiceError) {
+        return res.status(err.status).json({ message: err.message, code: err.code });
+      }
+      throw err;
     }
 
-    const { errors, parsed } = validateMetricCounts(req.body || {}, { requireAll: false });
-    if (errors.length > 0) {
-      return res.status(400).json({ message: "Invalid metric values", errors });
+    if (channel.subscribers === null) {
+      return res.status(422).json({
+        message: "This channel hides its subscriber count, so it cannot be recorded.",
+      });
     }
 
-    // content_id/platform_id are intentionally not editable here — a metric
-    // row's identity (which content, which platform) shouldn't change after
-    // the fact; delete and re-create if it was logged against the wrong one.
-    await db.query(
-      `UPDATE performance_metrics SET
-         views = COALESCE(?, views),
-         likes = COALESCE(?, likes),
-         comments = COALESCE(?, comments),
-         shares = COALESCE(?, shares)
-       WHERE metric_id = ?`,
-      [parsed.views, parsed.likes, parsed.comments, parsed.shares, id]
+    const platformId = platformRows[0].platform_id;
+
+    // Same rule as the video sync: repeated clicks must not litter the
+    // growth history with identical rows seconds apart.
+    const [latestRows] = await db.query(
+      `SELECT follower_metric_id, follower_count, recorded_at
+       FROM follower_metrics
+       WHERE user_id = ? AND platform_id = ?
+       ORDER BY recorded_at DESC, follower_metric_id DESC
+       LIMIT 1`,
+      [DEFAULT_USER_ID, platformId]
     );
 
-    const [rows] = await db.query(`${PERFORMANCE_SELECT} WHERE pm.metric_id = ?`, [id]);
-    res.json(castNumbers(rows[0], ["engagement_rate"]));
-  })
-);
+    const latest = latestRows[0];
+    const isDuplicate =
+      latest &&
+      latest.follower_count === channel.subscribers &&
+      secondsSince(latest.recorded_at) < SYNC_DEDUPE_SECONDS;
+
+    let followerMetricId;
+    if (isDuplicate) {
+      followerMetricId = latest.follower_metric_id;
+    } else {
+      const [result] = await db.query(
+        `INSERT INTO follower_metrics (user_id, platform_id, recorded_at, follower_count)
+         VALUES (?, ?, NOW(), ?)`,
+        [DEFAULT_USER_ID, platformId, channel.subscribers]
+      );
+      followerMetricId = result.insertId;
+    }
+
+    const [rows] = await db.query(
+      `SELECT fm.follower_metric_id, fm.user_id, fm.platform_id, p.platform_name,
+              fm.recorded_at, fm.follower_count
+       FROM follower_metrics fm
+       JOIN platforms p ON p.platform_id = fm.platform_id
+       WHERE fm.follower_metric_id = ?`,
+      [followerMetricId]
+    );
+
+    res.status(isDuplicate ? 200 : 201).json({
+      follower_metric: rows[0],
+      source: { platform: "youtube", channel_id: channelId, channel_title: channel.title },
+      deduplicated: Boolean(isDuplicate),
+    });
+});
+
+app.post("/follower-metrics/sync/youtube", syncYoutubeSubscribers);
+// Longer, self-describing alias used by the analytics page.
+app.post("/api/analytics/youtube/subscribers/sync", syncYoutubeSubscribers);
+
+// SUBSCRIBER ANALYTICS
+// Current/previous counts, growth and the full snapshot history for the
+// chart. Growth is null (rendered as "N/A") until a second snapshot
+// exists — it is never estimated.
+const followerAnalytics = asyncHandler(async (req, res) => {
+  const [platformRows] = await db.query(
+    "SELECT platform_id FROM platforms WHERE LOWER(platform_name) = 'youtube'"
+  );
+  if (platformRows.length === 0) {
+    return res.status(400).json({ message: "No 'YouTube' row exists in the platforms table." });
+  }
+
+  const [history] = await db.query(
+    `SELECT follower_metric_id, recorded_at, follower_count
+     FROM follower_metrics
+     WHERE user_id = ? AND platform_id = ?
+     ORDER BY recorded_at ASC, follower_metric_id ASC`,
+    [DEFAULT_USER_ID, platformRows[0].platform_id]
+  );
+
+  const current = history.length > 0 ? history[history.length - 1] : null;
+  const previous = history.length > 1 ? history[history.length - 2] : null;
+
+  const currentSubscribers = current ? current.follower_count : null;
+  const previousSubscribers = previous ? previous.follower_count : null;
+
+  const subscriberGrowth =
+    currentSubscribers !== null && previousSubscribers !== null
+      ? currentSubscribers - previousSubscribers
+      : null;
+
+  // Guard against dividing by zero on a brand-new channel.
+  const growthRate =
+    subscriberGrowth !== null && previousSubscribers > 0
+      ? Math.round((subscriberGrowth / previousSubscribers) * 10000) / 100
+      : null;
+
+  res.json({
+    platform: "youtube",
+    currentSubscribers,
+    previousSubscribers,
+    subscriberGrowth,
+    growthRate,
+    lastSyncedAt: current ? current.recorded_at : null,
+    history: history.map((row) => ({
+      recorded_at: row.recorded_at,
+      follower_count: row.follower_count,
+    })),
+  });
+});
+
+app.get("/analytics/followers", followerAnalytics);
+app.get("/api/analytics/followers", followerAnalytics);
 
 app.delete(
   "/performance-metrics/:id",

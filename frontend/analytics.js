@@ -7,11 +7,10 @@ let platformData = [];
 let trendData = [];
 let metricsData = [];
 
-let contentOptions = [];   // from GET /content   -> {content_id, title}
-let platformOptions = [];  // from GET /platforms -> {platform_id, platform_name}
+let followerData = null;   // from GET /api/analytics/followers
 
-let trendChart = null;     // Chart.js instance
-let editingMetricId = null; // null = "add" mode, otherwise metric_id being edited
+let trendChart = null;      // Chart.js instance
+let subscriberChart = null; // Chart.js instance
 
 // ============================================
 // INIT
@@ -21,26 +20,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const refreshBtn = document.getElementById("refreshBtn");
     if (refreshBtn) refreshBtn.addEventListener("click", loadAnalytics);
 
-    const addBtn = document.getElementById("addMetricBtn");
-    if (addBtn) addBtn.addEventListener("click", () => openMetricModal());
+    const syncSubscribersBtn = document.getElementById("syncSubscribersBtn");
+    if (syncSubscribersBtn) syncSubscribersBtn.addEventListener("click", syncSubscribers);
 
-    const closeBtn = document.getElementById("closeMetricModal");
-    if (closeBtn) closeBtn.addEventListener("click", closeMetricModal);
-
-    const cancelBtn = document.getElementById("cancelMetricForm");
-    if (cancelBtn) cancelBtn.addEventListener("click", closeMetricModal);
-
-    const modal = document.getElementById("metricModal");
-    if (modal) {
-        modal.addEventListener("click", (e) => {
-            if (e.target === modal) closeMetricModal();
-        });
-    }
-
-    const form = document.getElementById("metricForm");
-    if (form) form.addEventListener("submit", submitMetricForm);
-
-    loadFormOptions();
     loadAnalytics();
 });
 
@@ -53,12 +35,13 @@ async function loadAnalytics() {
     clearPageError();
 
     try {
-        const [summaryRes, topRes, platformRes, trendRes, metricsRes] = await Promise.all([
+        const [summaryRes, topRes, platformRes, trendRes, metricsRes, followersRes] = await Promise.all([
             fetch(`${API_BASE}/analytics/summary`),
             fetch(`${API_BASE}/analytics/top-content`),
             fetch(`${API_BASE}/analytics/platform-performance`),
             fetch(`${API_BASE}/analytics/performance-over-time`),
             fetch(`${API_BASE}/performance-metrics`),
+            fetch(`${API_BASE}/api/analytics/followers`),
         ]);
 
         summaryData = await expectOk(summaryRes, "Could not load the analytics summary.");
@@ -66,8 +49,10 @@ async function loadAnalytics() {
         platformData = await expectOk(platformRes, "Could not load platform performance.");
         trendData = await expectOk(trendRes, "Could not load the performance trend.");
         metricsData = await expectOk(metricsRes, "Could not load performance records.");
+        followerData = await expectOk(followersRes, "Could not load subscriber analytics.");
 
         renderSummary();
+        renderSubscribers();
         renderTrendChart();
         renderPlatformTable();
         renderTopContent();
@@ -77,32 +62,6 @@ async function loadAnalytics() {
         showPageError(error.message || "Unable to load analytics data. Please try again.");
     } finally {
         setAnalyticsLoading(false);
-    }
-}
-
-// Loads the dropdown data used by the Add/Edit Metric form. Kept separate
-// from loadAnalytics() so a failure here doesn't block the dashboard, and
-// so we don't re-fetch it on every refresh.
-async function loadFormOptions() {
-    try {
-        const [contentRes, platformsRes] = await Promise.all([
-            fetch(`${API_BASE}/content`),
-            fetch(`${API_BASE}/platforms`),
-        ]);
-
-        contentOptions = await expectOk(contentRes, "Could not load content list.");
-        platformOptions = await expectOk(platformsRes, "Could not load platforms.");
-
-        populateSelect("metricContent", contentOptions, "content_id", "title", "Select content…");
-        populateSelect("metricPlatform", platformOptions, "platform_id", "platform_name", "Select platform…");
-    } catch (error) {
-        console.error("Error loading form options:", error);
-        // Non-fatal: the dashboard itself still works, only "Add Metric" is affected.
-        const addBtn = document.getElementById("addMetricBtn");
-        if (addBtn) {
-            addBtn.disabled = true;
-            addBtn.title = "Could not load content/platform lists.";
-        }
     }
 }
 
@@ -147,6 +106,158 @@ function setMetricValue(elementId, rawValue) {
     // (e.g. 13,600) — compact K/M abbreviation is reserved for the chart axis,
     // where a little imprecision is fine but an exact KPI total is not.
     el.textContent = formatNumber(rawValue);
+}
+
+// ============================================
+// YOUTUBE SUBSCRIBERS
+// (GET /api/analytics/followers,
+//  POST /api/analytics/youtube/subscribers/sync)
+//
+// Subscriber counts are only ever written by the sync endpoint, which
+// reads them from the YouTube Data API — there is no input field here.
+// ============================================
+
+function renderSubscribers() {
+    const data = followerData || {};
+    const hasCurrent = data.currentSubscribers !== null && data.currentSubscribers !== undefined;
+
+    setText("kpiSubscribers", hasCurrent ? formatNumber(data.currentSubscribers) : "—");
+
+    // Growth needs two snapshots; until then it is N/A rather than a
+    // misleading zero.
+    const growth = data.subscriberGrowth;
+    setText(
+        "kpiSubscriberGrowth",
+        growth === null || growth === undefined
+            ? "N/A"
+            : `${growth > 0 ? "+" : ""}${formatNumber(growth)}`
+    );
+
+    const rate = data.growthRate;
+    setText(
+        "kpiSubscriberGrowthRate",
+        rate === null || rate === undefined ? "N/A" : `${rate > 0 ? "+" : ""}${rate}%`
+    );
+
+    const statusEl = document.getElementById("subscriberStatus");
+    if (statusEl && !statusEl.textContent && data.lastSyncedAt) {
+        setSubscriberStatus(`Last synced ${formatDateTime(data.lastSyncedAt)}.`, "");
+    }
+
+    renderSubscriberChart(Array.isArray(data.history) ? data.history : []);
+}
+
+function renderSubscriberChart(history) {
+    const canvas = document.getElementById("subscriberChart");
+    const emptyState = document.getElementById("subscriberEmpty");
+    if (!canvas) return;
+
+    // One point is not a trend — no history is invented to fill the gap.
+    if (history.length < 2) {
+        canvas.style.display = "none";
+        if (emptyState) emptyState.style.display = "block";
+        if (subscriberChart) {
+            subscriberChart.destroy();
+            subscriberChart = null;
+        }
+        return;
+    }
+
+    canvas.style.display = "block";
+    if (emptyState) emptyState.style.display = "none";
+
+    const labels = history.map(row => formatDateTime(row.recorded_at));
+    const counts = history.map(row => Number(row.follower_count) || 0);
+
+    if (subscriberChart) {
+        subscriberChart.data.labels = labels;
+        subscriberChart.data.datasets[0].data = counts;
+        subscriberChart.update();
+        return;
+    }
+
+    subscriberChart = new Chart(canvas.getContext("2d"), {
+        type: "line",
+        data: {
+            labels,
+            datasets: [{
+                label: "Subscribers",
+                data: counts,
+                borderColor: "#CD201F",
+                backgroundColor: "rgba(205, 32, 31, 0.12)",
+                borderWidth: 2,
+                tension: 0.25,
+                pointRadius: 3,
+                pointBackgroundColor: "#CD201F",
+                fill: true,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => `${formatNumber(ctx.parsed.y)} subscribers`,
+                    },
+                },
+            },
+            scales: {
+                x: { grid: { display: false }, ticks: { color: "#7a6f6f" } },
+                y: {
+                    grid: { color: "#f0e1d4" },
+                    ticks: { color: "#7a6f6f", callback: (value) => formatCompactNumber(value) },
+                },
+            },
+        },
+    });
+}
+
+async function syncSubscribers() {
+    const button = document.getElementById("syncSubscribersBtn");
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Syncing…";
+    }
+    setSubscriberStatus("Retrieving your subscriber count from YouTube…", "");
+
+    try {
+        const response = await fetch(`${API_BASE}/api/analytics/youtube/subscribers/sync`, {
+            method: "POST",
+        });
+        const body = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+            throw new Error(body.message || "Could not sync your YouTube subscribers.");
+        }
+
+        const count = body.follower_metric ? body.follower_metric.follower_count : null;
+        setSubscriberStatus(
+            body.deduplicated
+                ? "Already up to date — this count was recorded moments ago."
+                : `Recorded ${formatNumber(count)} subscribers from YouTube.`,
+            "ok"
+        );
+
+        await loadAnalytics();
+    } catch (error) {
+        console.error("Subscriber sync error:", error);
+        setSubscriberStatus(error.message || "Could not sync your YouTube subscribers.", "error");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = "Sync YouTube Subscribers";
+        }
+    }
+}
+
+function setSubscriberStatus(message, state) {
+    const el = document.getElementById("subscriberStatus");
+    if (!el) return;
+    el.textContent = message;
+    el.classList.remove("ok", "error");
+    if (state) el.classList.add(state);
 }
 
 // ============================================
@@ -295,8 +406,12 @@ function renderTopContent() {
 }
 
 // ============================================
-// PERFORMANCE METRICS MANAGEMENT
-// (GET/POST/PUT/DELETE /performance-metrics)
+// PERFORMANCE METRICS LIST
+// (GET/DELETE /performance-metrics)
+//
+// Read-only apart from deleting a bad snapshot: metrics are recorded by
+// syncing a linked published video from the Content Planner, never typed
+// in here.
 // ============================================
 
 function renderMetricsTable() {
@@ -323,135 +438,14 @@ function renderMetricsTable() {
             <td>${formatPercent(metric.engagement_rate)}</td>
             <td>${formatDateTime(metric.recorded_at)}</td>
             <td class="metrics-actions">
-                <button type="button" class="edit-metric-btn" data-id="${metric.metric_id}">Edit</button>
                 <button type="button" class="delete-metric-btn" data-id="${metric.metric_id}">Delete</button>
             </td>
         </tr>
     `).join("");
 
-    tbody.querySelectorAll(".edit-metric-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-            const metric = metricsData.find(m => String(m.metric_id) === btn.dataset.id);
-            if (metric) openMetricModal(metric);
-        });
-    });
-
     tbody.querySelectorAll(".delete-metric-btn").forEach(btn => {
         btn.addEventListener("click", () => deleteMetric(btn.dataset.id));
     });
-}
-
-// ---- Add / Edit modal --------------------------------------------------
-
-function openMetricModal(metric) {
-    const modal = document.getElementById("metricModal");
-    const title = document.getElementById("metricModalTitle");
-    const form = document.getElementById("metricForm");
-    const contentField = document.getElementById("metricContent");
-    const platformField = document.getElementById("metricPlatform");
-    const formError = document.getElementById("metricFormError");
-
-    if (!modal || !form) return;
-
-    form.reset();
-    if (formError) formError.textContent = "";
-
-    editingMetricId = metric ? metric.metric_id : null;
-
-    if (metric) {
-        if (title) title.textContent = "Edit Performance Metric";
-        // The content/platform lists load in parallel with the metrics table,
-        // so on a slow connection the matching <option> might not exist yet —
-        // ensure it does before selecting it, using the names already on the metric.
-        ensureOptionExists(contentField, metric.content_id, metric.content_title);
-        ensureOptionExists(platformField, metric.platform_id, metric.platform_name);
-        contentField.value = metric.content_id;
-        platformField.value = metric.platform_id;
-        contentField.disabled = true;
-        platformField.disabled = true;
-        document.getElementById("metricViews").value = metric.views;
-        document.getElementById("metricLikes").value = metric.likes;
-        document.getElementById("metricComments").value = metric.comments;
-        document.getElementById("metricShares").value = metric.shares;
-    } else {
-        if (title) title.textContent = "Add Performance Metric";
-        contentField.disabled = false;
-        platformField.disabled = false;
-    }
-
-    modal.classList.add("active");
-}
-
-function closeMetricModal() {
-    const modal = document.getElementById("metricModal");
-    if (modal) modal.classList.remove("active");
-    editingMetricId = null;
-}
-
-async function submitMetricForm(event) {
-    event.preventDefault();
-
-    const formError = document.getElementById("metricFormError");
-    const submitBtn = document.getElementById("saveMetricBtn");
-    if (formError) formError.textContent = "";
-
-    const views = Number(document.getElementById("metricViews").value);
-    const likes = Number(document.getElementById("metricLikes").value);
-    const comments = Number(document.getElementById("metricComments").value);
-    const shares = Number(document.getElementById("metricShares").value);
-
-    const counts = { views, likes, comments, shares };
-    for (const [field, value] of Object.entries(counts)) {
-        if (!Number.isInteger(value) || value < 0) {
-            if (formError) formError.textContent = `${field} must be a whole number that is 0 or greater.`;
-            return;
-        }
-    }
-
-    const payload = { ...counts };
-
-    let url = `${API_BASE}/performance-metrics`;
-    let method = "POST";
-
-    if (editingMetricId) {
-        url = `${API_BASE}/performance-metrics/${editingMetricId}`;
-        method = "PUT";
-    } else {
-        const contentId = document.getElementById("metricContent").value;
-        const platformId = document.getElementById("metricPlatform").value;
-
-        if (!contentId || !platformId) {
-            if (formError) formError.textContent = "Please select both content and a platform.";
-            return;
-        }
-
-        payload.content_id = Number(contentId);
-        payload.platform_id = Number(platformId);
-    }
-
-    if (submitBtn) submitBtn.disabled = true;
-
-    try {
-        const response = await fetch(url, {
-            method,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-
-        if (!response.ok) {
-            const body = await response.json().catch(() => ({}));
-            const detail = Array.isArray(body.errors) ? body.errors.join(" ") : "";
-            throw new Error([body.message, detail].filter(Boolean).join(" ") || "Could not save this metric.");
-        }
-
-        closeMetricModal();
-        await loadAnalytics();
-    } catch (error) {
-        console.error("Error saving metric:", error);
-        if (formError) formError.textContent = error.message || "Could not save this metric. Please try again.";
-    } finally {
-        if (submitBtn) submitBtn.disabled = false;
-    }
 }
 
 async function deleteMetric(id) {
@@ -471,33 +465,6 @@ async function deleteMetric(id) {
         console.error("Error deleting metric:", error);
         showPageError(error.message || "Could not delete this metric. Please try again.");
     }
-}
-
-// ============================================
-// FORM OPTIONS HELPER
-// ============================================
-
-function ensureOptionExists(selectEl, value, label) {
-    if (!selectEl || value === undefined || value === null) return;
-    const exists = Array.from(selectEl.options).some(opt => opt.value === String(value));
-    if (!exists) {
-        const opt = document.createElement("option");
-        opt.value = String(value);
-        opt.textContent = label || `#${value}`;
-        selectEl.appendChild(opt);
-    }
-}
-
-function populateSelect(elementId, items, valueField, labelField, placeholder) {
-    const select = document.getElementById(elementId);
-    if (!select) return;
-
-    const options = [`<option value="">${escapeHTML(placeholder)}</option>`]
-        .concat(items.map(item => `
-            <option value="${item[valueField]}">${escapeHTML(item[labelField] || `#${item[valueField]}`)}</option>
-        `));
-
-    select.innerHTML = options.join("");
 }
 
 // ============================================
