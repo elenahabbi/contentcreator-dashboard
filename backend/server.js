@@ -1,14 +1,62 @@
 console.log("Backend server starting...");
 require("dotenv").config();
 
+const path = require("path");
 const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
+const session = require("express-session");
+const { passport, isGoogleOAuthConfigured } = require("./config/passport");
+const youtubeService = require("./services/youtubeService");
+const { classifyVideoMatch } = require("./services/videoMatcher");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+// Serves the existing vanilla frontend as-is (no build step, no changes
+// to any frontend file's location). This also gives the app a stable
+// http://localhost:3000 origin to redirect back to once Google OAuth
+// finishes — see FRONTEND_URL and the /auth/youtube/callback route below.
+app.use(express.static(path.join(__dirname, "..", "frontend")));
+
+// ---------------------------------------------------------------------
+// SESSION + PASSPORT (YouTube OAuth connection only)
+// A session is required for Passport to carry state between
+// GET /auth/youtube and GET /auth/youtube/callback. It is intentionally
+// minimal: nothing about "being logged in" is tracked here, and the
+// per-request session data created during OAuth is cleared (req.logout)
+// as soon as the callback route has used it. See config/passport.js.
+// ---------------------------------------------------------------------
+if (!process.env.SESSION_SECRET) {
+  console.warn(
+    "[server] SESSION_SECRET is not set in backend/.env — using an insecure " +
+      "development-only fallback. Set a real SESSION_SECRET before deploying."
+  );
+}
+
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || "dev-only-insecure-secret-change-me",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false, // set true once the app is served over HTTPS
+      maxAge: 5 * 60 * 1000, // only needs to survive the OAuth round-trip
+    },
+  })
+);
+app.use(passport.initialize());
+app.use(passport.session());
+
+// Where to send the browser back to once the OAuth round-trip (which
+// happens entirely on this server's own origin) is done. Defaults to
+// this same server, since it now serves the frontend (see express.static
+// above); override in .env if the frontend is served elsewhere.
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 // ---------------------------------------------------------------------
 // TEMPORARY SINGLE-USER ASSUMPTION
@@ -44,6 +92,22 @@ const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
 
+// =======================================================================
+// AUTOMATIC MISSED-CONTENT DETECTION
+// A scheduled item is "missed" the moment its scheduled_date is in the
+// past and nobody ever marked it Published. Nothing here asks the creator
+// to declare anything missed manually — this just persists what is
+// already true. Published and Cancelled rows are never touched.
+// =======================================================================
+async function updateMissedScheduledContent() {
+  await db.query(
+    `UPDATE scheduled_content
+     SET status = 'Missed'
+     WHERE status = 'Scheduled'
+       AND scheduled_date < NOW()`
+  );
+}
+
 // mysql2 returns SUM()/AVG()/ROUND() results as strings (DECIMAL columns
 // are stringified to avoid silent precision loss). The frontend/analytics
 // layer expects real numbers, so cast the specific aggregate/computed
@@ -62,6 +126,75 @@ function castNumbersAll(rows, fields) {
   rows.forEach((row) => castNumbers(row, fields));
   return rows;
 }
+
+// =======================================================================
+// PART 4 SUPPORT — per-channel analytics scoping
+//
+// Root cause (see database/migrations/002_scheduled_content_channel_scoping.sql
+// for the full write-up): performance_metrics/content/scheduled_content
+// had no column recording which YouTube channel was connected when a
+// video was linked, so switching channels never hid a previous channel's
+// synced metrics from the "current channel" analytics views — there was
+// nothing to filter on. scheduled_content.youtube_channel_id (added by
+// that migration) is the fix; these two helpers support it:
+//
+//   - getConnectedYoutubeChannelId(): the channel analytics should be
+//     scoped to right now.
+//   - hasChannelScopingColumn(): lets every query below detect whether
+//     the migration has actually been run yet, and fall back to the
+//     previous (unscoped) behaviour with a one-time warning instead of
+//     throwing a SQL error, if it hasn't.
+// =======================================================================
+
+async function getConnectedYoutubeChannelId() {
+  const [rows] = await db.query(
+    "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 1",
+    [DEFAULT_USER_ID]
+  );
+  return (rows[0] && rows[0].youtube_channel_id) || null;
+}
+
+let _hasChannelScopingColumnPromise = null;
+function hasChannelScopingColumn() {
+  if (!_hasChannelScopingColumnPromise) {
+    _hasChannelScopingColumnPromise = db
+      .query("SHOW COLUMNS FROM scheduled_content LIKE 'youtube_channel_id'")
+      .then(([rows]) => rows.length > 0)
+      .catch(() => false);
+    _hasChannelScopingColumnPromise.then((has) => {
+      if (!has) {
+        console.warn(
+          "[server] scheduled_content.youtube_channel_id is missing — run " +
+            "database/migrations/002_scheduled_content_channel_scoping.sql " +
+            "to enable per-channel analytics scoping (PART 4 fix). Analytics " +
+            "will keep working, but a previously-connected channel's synced " +
+            "metrics may still appear alongside the currently connected " +
+            "channel's until that migration is run."
+        );
+      }
+    });
+  }
+  return _hasChannelScopingColumnPromise;
+}
+
+// Shared WHERE fragment: with `pm` = performance_metrics and `p` =
+// platforms already joined/aliased in the calling query, this keeps
+// every non-YouTube row (nothing else has a channel concept here) and
+// only keeps YouTube rows whose linked scheduled_content was stamped
+// with the CURRENTLY connected channel id. Expects exactly one `?`
+// parameter: the current channel id (or null, which correctly excludes
+// every YouTube row when nothing is connected).
+const YT_CHANNEL_SCOPE_SQL = `
+  (
+    LOWER(p.platform_name) <> 'youtube'
+    OR EXISTS (
+      SELECT 1 FROM scheduled_content sc
+      WHERE sc.content_id = pm.content_id
+        AND sc.platform_id = pm.platform_id
+        AND sc.youtube_channel_id = ?
+    )
+  )
+`;
 
 // TEST ROUTE
 app.get("/", (req, res) => {
@@ -357,6 +490,7 @@ const SCHEDULED_SELECT = `
   SELECT
     sc.schedule_id, sc.content_id, sc.platform_id, sc.scheduled_date,
     sc.published_at, sc.status,
+    sc.external_content_id, sc.external_content_url,
     CASE
       WHEN sc.status = 'Scheduled' AND sc.scheduled_date < NOW() THEN 'Missed'
       ELSE sc.status
@@ -371,6 +505,7 @@ const SCHEDULED_SELECT = `
 app.get(
   "/scheduled-content",
   asyncHandler(async (req, res) => {
+    await updateMissedScheduledContent();
     const [rows] = await db.query(`${SCHEDULED_SELECT} ORDER BY sc.scheduled_date ASC`);
     res.json(rows);
   })
@@ -459,7 +594,8 @@ app.put(
   "/scheduled-content/:id",
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { scheduled_date, platform_id, status, published_at } = req.body || {};
+    const { scheduled_date, platform_id, status, published_at, external_content_url } =
+      req.body || {};
 
     const [existing] = await db.query(
       "SELECT * FROM scheduled_content WHERE schedule_id = ?",
@@ -485,14 +621,69 @@ app.put(
       finalPublishedAt = new Date().toISOString().slice(0, 19).replace("T", " ");
     }
 
+    // Linking a published video: this is content the creator is pointing us
+    // to, not analytics they're typing in. The external ID is always derived
+    // here on the server from the URL — a client-supplied ID is never trusted.
+    let finalExternalUrl;
+    let finalExternalId;
+    let finalYoutubeChannelId;
+    const scopingColumnAvailable = await hasChannelScopingColumn();
+    if (external_content_url !== undefined) {
+      if (external_content_url === null || external_content_url === "") {
+        // explicit clear (e.g. "unlink video") — clears the recorded
+        // channel attribution along with it, see PART 4.
+        finalExternalUrl = null;
+        finalExternalId = null;
+        finalYoutubeChannelId = null;
+      } else {
+        const derivedId = youtubeService.extractVideoId(external_content_url);
+        if (!derivedId) {
+          return res.status(400).json({
+            message:
+              "Could not recognize that as a YouTube video URL. Paste a link like https://www.youtube.com/watch?v=... , https://youtu.be/... , or a Shorts link.",
+          });
+        }
+        finalExternalUrl = external_content_url;
+        finalExternalId = derivedId;
+        // Best-effort attribution: unlike find-youtube-video/select-youtube-video,
+        // a pasted URL is never verified against the connected channel's own
+        // uploads (see youtubeService.getVideoStatistics usage there) — this
+        // just records which channel was connected at the moment of linking,
+        // for PART 4 analytics scoping. Use those two routes instead of a
+        // pasted URL when the video's real channel ownership matters.
+        finalYoutubeChannelId = scopingColumnAvailable
+          ? await getConnectedYoutubeChannelId()
+          : null;
+      }
+    }
+
+    const setClauses = [
+      "scheduled_date = COALESCE(?, scheduled_date)",
+      "platform_id = COALESCE(?, platform_id)",
+      "status = COALESCE(?, status)",
+      "published_at = COALESCE(?, published_at)",
+      "external_content_url = CASE WHEN ? THEN ? ELSE external_content_url END",
+      "external_content_id = CASE WHEN ? THEN ? ELSE external_content_id END",
+    ];
+    const params = [
+      scheduled_date,
+      platform_id,
+      status,
+      finalPublishedAt,
+      external_content_url !== undefined,
+      finalExternalUrl,
+      external_content_url !== undefined,
+      finalExternalId,
+    ];
+    if (scopingColumnAvailable) {
+      setClauses.push("youtube_channel_id = CASE WHEN ? THEN ? ELSE youtube_channel_id END");
+      params.push(external_content_url !== undefined, finalYoutubeChannelId);
+    }
+    params.push(id);
+
     await db.query(
-      `UPDATE scheduled_content SET
-         scheduled_date = COALESCE(?, scheduled_date),
-         platform_id = COALESCE(?, platform_id),
-         status = COALESCE(?, status),
-         published_at = COALESCE(?, published_at)
-       WHERE schedule_id = ?`,
-      [scheduled_date, platform_id, status, finalPublishedAt, id]
+      `UPDATE scheduled_content SET ${setClauses.join(", ")} WHERE schedule_id = ?`,
+      params
     );
 
     const [rows] = await db.query(`${SCHEDULED_SELECT} WHERE sc.schedule_id = ?`, [id]);
@@ -521,6 +712,212 @@ app.patch(
 
     const [rows] = await db.query(`${SCHEDULED_SELECT} WHERE sc.schedule_id = ?`, [id]);
     res.json(rows[0]);
+  })
+);
+
+// Reverses "Mark as Published" — this is purely an application-state
+// revert (Published -> Scheduled). It never touches the real YouTube
+// video: external_content_id/external_content_url (the linked video) are
+// intentionally left as-is, since unpublishing in this app has nothing to
+// do with deleting/unpublishing the actual upload on YouTube. No new
+// status value is introduced — Scheduled is already part of the existing
+// scheduled_content status vocabulary.
+app.patch(
+  "/scheduled-content/:id/unpublish",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const [existing] = await db.query(
+      "SELECT * FROM scheduled_content WHERE schedule_id = ?",
+      [id]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: "Scheduled item not found" });
+    }
+
+    await db.query(
+      `UPDATE scheduled_content SET status = 'Scheduled', published_at = NULL
+       WHERE schedule_id = ?`,
+      [id]
+    );
+
+    const [rows] = await db.query(`${SCHEDULED_SELECT} WHERE sc.schedule_id = ?`, [id]);
+    res.json(rows[0]);
+  })
+);
+
+// =======================================================================
+// AUTOMATIC YOUTUBE VIDEO MATCHING
+// Replaces the old "paste a YouTube URL" workflow. Uses the creator's own
+// connected channel (users.youtube_channel_id, set once during OAuth) and
+// the scheduled item's own content title — already present via the
+// content/scripts relationship, never a new/duplicate title field — to
+// find the matching video. This never runs a blind, site-wide YouTube
+// search, and it never guesses: an ambiguous result goes back to the
+// frontend as candidates for the creator to choose from, and a genuine
+// miss is reported as "no match" rather than being forced onto a video
+// that might be wrong.
+// =======================================================================
+
+async function getScheduleForYoutubeMatch(scheduleId) {
+  const [rows] = await db.query(
+    `SELECT sc.schedule_id, sc.content_id, sc.platform_id, sc.external_content_id,
+            c.title AS content_title, p.platform_name
+     FROM scheduled_content sc
+     JOIN content c ON c.content_id = sc.content_id
+     JOIN platforms p ON p.platform_id = sc.platform_id
+     WHERE sc.schedule_id = ?`,
+    [scheduleId]
+  );
+  return rows[0] || null;
+}
+
+function buildYoutubeWatchUrl(videoId) {
+  return `https://www.youtube.com/watch?v=${videoId}`;
+}
+
+// Shared by both routes below: the only place that actually writes
+// external_content_id/external_content_url once a video has been
+// identified, whether that happened automatically or via the creator's
+// own selection from a candidate list.
+// channelId: the connected channel this video was just verified against
+// (both call sites below already look this up before calling here).
+// Stamped into scheduled_content.youtube_channel_id so PART 4's
+// analytics scoping can tell this video apart from one linked under a
+// different, previously-connected channel — see YT_CHANNEL_SCOPE_SQL
+// above. Skipped gracefully (falls back to the pre-migration UPDATE) if
+// the migration hasn't been run yet.
+async function linkYoutubeVideo(scheduleId, videoId, channelId) {
+  if (await hasChannelScopingColumn()) {
+    await db.query(
+      `UPDATE scheduled_content
+       SET external_content_id = ?, external_content_url = ?, youtube_channel_id = ?
+       WHERE schedule_id = ?`,
+      [videoId, buildYoutubeWatchUrl(videoId), channelId || null, scheduleId]
+    );
+  } else {
+    await db.query(
+      `UPDATE scheduled_content SET external_content_id = ?, external_content_url = ?
+       WHERE schedule_id = ?`,
+      [videoId, buildYoutubeWatchUrl(videoId), scheduleId]
+    );
+  }
+  const [rows] = await db.query(`${SCHEDULED_SELECT} WHERE sc.schedule_id = ?`, [scheduleId]);
+  return rows[0];
+}
+
+// Looks up the connected channel and runs the search + classification.
+// Can be called either right after publishing or any time the creator
+// explicitly asks to (re)search — the frontend gates *when* the button is
+// shown, this route doesn't need to know why it was called.
+app.post(
+  "/scheduled-content/:id/find-youtube-video",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    const schedule = await getScheduleForYoutubeMatch(id);
+    if (!schedule) {
+      return res.status(404).json({ message: "Scheduled item not found" });
+    }
+    if ((schedule.platform_name || "").toLowerCase() !== "youtube") {
+      return res.status(400).json({
+        message: `This scheduled item is on ${schedule.platform_name || "an unknown platform"}, not YouTube. Automatic video matching currently supports YouTube only.`,
+      });
+    }
+
+    const [userRows] = await db.query(
+      "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 5",
+      [DEFAULT_USER_ID]
+    );
+    const channelId = userRows[0] && userRows[0].youtube_channel_id;
+    if (!channelId) {
+      return res.status(400).json({
+        message: "Connect your YouTube account first (see the Analytics page), then try again.",
+        code: "YOUTUBE_NOT_CONNECTED",
+      });
+    }
+
+    let candidates;
+    try {
+      candidates = await youtubeService.searchChannelVideosByTitle(channelId, schedule.content_title);
+    } catch (error) {
+      if (error instanceof youtubeService.YouTubeServiceError) {
+        return res.status(error.status).json({ message: error.message, code: error.code });
+      }
+      throw error;
+    }
+
+    const result = classifyVideoMatch(schedule.content_title, candidates);
+
+    if (result.matchType === "exact" || result.matchType === "normalized") {
+      const scheduled = await linkYoutubeVideo(id, result.match.videoId, channelId);
+      return res.json({ matchType: result.matchType, video: result.match, scheduled });
+    }
+
+    if (result.matchType === "multiple") {
+      return res.json({ matchType: "multiple", candidates: result.candidates });
+    }
+
+    res.json({
+      matchType: "none",
+      message: "No matching video was found on your connected YouTube channel.",
+    });
+  })
+);
+
+// Called when the creator picks one of several candidates returned above.
+// The chosen video ID is never trusted blindly — it's re-verified against
+// the connected channel before anything is written, the same principle
+// already used for URL-derived IDs elsewhere in this file.
+app.post(
+  "/scheduled-content/:id/select-youtube-video",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { video_id: videoId } = req.body || {};
+
+    if (!videoId) {
+      return res.status(400).json({ message: "video_id is required" });
+    }
+
+    const schedule = await getScheduleForYoutubeMatch(id);
+    if (!schedule) {
+      return res.status(404).json({ message: "Scheduled item not found" });
+    }
+    if ((schedule.platform_name || "").toLowerCase() !== "youtube") {
+      return res.status(400).json({
+        message: `This scheduled item is on ${schedule.platform_name || "an unknown platform"}, not YouTube.`,
+      });
+    }
+
+    const [userRows] = await db.query(
+      "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 5",
+      [DEFAULT_USER_ID]
+    );
+    const channelId = userRows[0] && userRows[0].youtube_channel_id;
+    if (!channelId) {
+      return res.status(400).json({
+        message: "Connect your YouTube account first (see the Analytics page), then try again.",
+        code: "YOUTUBE_NOT_CONNECTED",
+      });
+    }
+
+    let stats;
+    try {
+      stats = await youtubeService.getVideoStatistics(videoId);
+    } catch (error) {
+      if (error instanceof youtubeService.YouTubeServiceError) {
+        return res.status(error.status).json({ message: error.message, code: error.code });
+      }
+      throw error;
+    }
+
+    if (stats.channelId !== channelId) {
+      return res.status(400).json({
+        message: "That video does not belong to your connected YouTube channel.",
+      });
+    }
+
+    const scheduled = await linkYoutubeVideo(id, videoId, channelId);
+    res.json({ matchType: "manual", video: { videoId, title: stats.title }, scheduled });
   })
 );
 
@@ -701,23 +1098,544 @@ app.delete(
 );
 
 // =======================================================================
+// YOUTUBE ACCOUNT CONNECTION (Google OAuth via Passport)
+//
+// Lets the creator connect their YouTube account so the app can find
+// their channel ID automatically instead of it being typed in manually.
+// This is separate from GOOGLE_API_KEY (used above/below for public
+// video and channel statistics) — OAuth here is used for exactly one
+// thing: identifying the authenticated user's own channel right after
+// they authorise the app. No OAuth token is ever stored or sent to the
+// frontend; only the resulting channel ID is persisted, in the existing
+// users.youtube_channel_id column, for DEFAULT_USER_ID (see note above).
+// =======================================================================
+
+app.get("/auth/youtube", (req, res, next) => {
+  if (!isGoogleOAuthConfigured) {
+    return res.redirect(`${FRONTEND_URL}/analytics.html?youtube=config_missing`);
+  }
+  passport.authenticate("google", {
+    // profile: minimal identification of the Google account itself.
+    // youtube.readonly: the narrowest scope that allows looking up
+    // which channel belongs to this account (channels.list?mine=true).
+    // Nothing broader (uploads, comments, video management, etc.) is
+    // requested, since nothing in this task writes to YouTube.
+    scope: ["profile", "https://www.googleapis.com/auth/youtube.readonly"],
+    prompt: "select_account",
+  })(req, res, next);
+});
+
+app.get(
+  "/auth/youtube/callback",
+  (req, res, next) => {
+    if (!isGoogleOAuthConfigured) {
+      return res.redirect(`${FRONTEND_URL}/analytics.html?youtube=config_missing`);
+    }
+    passport.authenticate("google", {
+      session: true,
+      failureRedirect: `${FRONTEND_URL}/analytics.html?youtube=error`,
+    })(req, res, next);
+  },
+  asyncHandler(async (req, res) => {
+    const accessToken = req.user && req.user.accessToken;
+
+    // The OAuth token was only ever needed for the lookup below — clear
+    // it out of the session now rather than leaving it sitting around.
+    req.logout(() => {});
+
+    if (!accessToken) {
+      return res.redirect(`${FRONTEND_URL}/analytics.html?youtube=error`);
+    }
+
+    let channelId;
+    try {
+      channelId = await youtubeService.getMyChannelId(accessToken);
+    } catch (error) {
+      console.error("YouTube channel lookup failed:", error.message);
+      return res.redirect(`${FRONTEND_URL}/analytics.html?youtube=error`);
+    }
+
+    await db.query("UPDATE users SET youtube_channel_id = ? WHERE user_id = ?", [
+      channelId,
+      DEFAULT_USER_ID,
+    ]);
+
+    res.redirect(`${FRONTEND_URL}/analytics.html?youtube=connected`);
+  })
+);
+
+// Lets the frontend ask "is YouTube connected?" without ever seeing a
+// token — this is a plain DB read keyed on DEFAULT_USER_ID, the same
+// single-creator assumption used everywhere else in this file.
+app.get(
+  "/youtube/connection-status",
+  asyncHandler(async (req, res) => {
+    const [rows] = await db.query(
+      "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 5",
+      [DEFAULT_USER_ID]
+    );
+
+    const channelId = rows[0] && rows[0].youtube_channel_id;
+    if (!channelId) {
+      return res.json({ connected: false });
+    }
+    res.json({ connected: true, channelId });
+  })
+);
+
+// =======================================================================
+// PERFORMANCE METRICS SYNC (YouTube)
+// Pulls genuine statistics from the YouTube Data API for a scheduled
+// item's linked video and records them as a new performance_metrics
+// snapshot. This route intentionally does NOT accept views/likes/
+// comments/shares in the body — those values come exclusively from
+// youtubeService, never from the client.
+// =======================================================================
+
+app.post(
+  "/performance-metrics/sync/:scheduleId",
+  asyncHandler(async (req, res) => {
+    const { scheduleId } = req.params;
+
+    const [scheduleRows] = await db.query(
+      `SELECT sc.schedule_id, sc.content_id, sc.platform_id,
+              sc.external_content_id, p.platform_name
+       FROM scheduled_content sc
+       JOIN platforms p ON p.platform_id = sc.platform_id
+       WHERE sc.schedule_id = ?`,
+      [scheduleId]
+    );
+
+    if (scheduleRows.length === 0) {
+      return res.status(404).json({ message: "Scheduled item not found" });
+    }
+
+    const schedule = scheduleRows[0];
+
+    if ((schedule.platform_name || "").toLowerCase() !== "youtube") {
+      return res.status(400).json({
+        message: `This scheduled item is on ${schedule.platform_name || "an unknown platform"}, not YouTube. Analytics sync currently supports YouTube only.`,
+      });
+    }
+
+    if (!schedule.external_content_id) {
+      return res.status(400).json({
+        message: "No YouTube video is linked to this scheduled item yet. Connect a video URL first.",
+      });
+    }
+
+    // Any manual counts in the body are ignored on purpose — genuine
+    // statistics only come from the YouTube API call below.
+    const stats = await youtubeService.getVideoStatistics(schedule.external_content_id);
+
+    // Dedupe guard: if this exact content/platform was synced in the last
+    // 60 seconds (e.g. an accidental double-click on "Sync"), update that
+    // snapshot instead of inserting a near-duplicate one. Older snapshots
+    // are never touched — history is preserved.
+    const [recent] = await db.query(
+      `SELECT metric_id FROM performance_metrics
+       WHERE content_id = ? AND platform_id = ? AND recorded_at >= (NOW() - INTERVAL 60 SECOND)
+       ORDER BY recorded_at DESC LIMIT 5`,
+      [schedule.content_id, schedule.platform_id]
+    );
+
+    let metricId;
+    if (recent.length > 0) {
+      metricId = recent[0].metric_id;
+      await db.query(
+        `UPDATE performance_metrics SET views = ?, likes = ?, comments = ?, shares = ?
+         WHERE metric_id = ?`,
+        [stats.views, stats.likes, stats.comments, stats.shares || 0, metricId]
+      );
+    } else {
+      const [result] = await db.query(
+        `INSERT INTO performance_metrics (content_id, platform_id, recorded_at, views, likes, comments, shares)
+         VALUES (?, ?, NOW(), ?, ?, ?, ?)`,
+        [schedule.content_id, schedule.platform_id, stats.views, stats.likes, stats.comments, stats.shares || 0]
+      );
+      metricId = result.insertId;
+    }
+
+    const [rows] = await db.query(`${PERFORMANCE_SELECT} WHERE pm.metric_id = ?`, [metricId]);
+    res.json({
+      ...castNumbers(rows[0], ["engagement_rate"]),
+      // shares is stored as 0 (schema requires NOT NULL) but the API never
+      // provided a real value — surface that distinction to the frontend.
+      shares_available: stats.shares !== null,
+      video_title: stats.title,
+    });
+  })
+);
+
+// =======================================================================
+// YOUTUBE SUBSCRIBER SYNC
+// Pulls the creator's public YouTube subscriber count from the YouTube
+// Data API and stores it as a historical follower_metrics snapshot.
+// The request body is intentionally ignored: subscriber counts are never
+// accepted from the client.
+// =======================================================================
+
+app.post(
+  "/api/analytics/youtube/subscribers/sync",
+  asyncHandler(async (req, res) => {
+    const [userRows] = await db.query(
+      `SELECT user_id, youtube_channel_id
+       FROM users
+       WHERE user_id = ?
+       LIMIT 5`,
+      [DEFAULT_USER_ID]
+    );
+
+    if (userRows.length === 0) {
+      return res.status(404).json({
+        message: "Default creator/user was not found.",
+        code: "USER_NOT_FOUND",
+      });
+    }
+
+    const user = userRows[0];
+
+    if (!user.youtube_channel_id) {
+      return res.status(400).json({
+        message: "Your YouTube channel ID has not been configured.",
+        code: "YOUTUBE_CHANNEL_NOT_CONFIGURED",
+      });
+    }
+
+    const [platformRows] = await db.query(
+      `SELECT platform_id
+       FROM platforms
+       WHERE LOWER(platform_name) = 'youtube'
+         AND is_active = 1
+       LIMIT 5`
+    );
+
+    if (platformRows.length === 0) {
+      return res.status(500).json({
+        message: "The YouTube platform is not configured in the database.",
+        code: "YOUTUBE_PLATFORM_NOT_CONFIGURED",
+      });
+    }
+
+    const platformId = platformRows[0].platform_id;
+
+        // Prevent accidental duplicate snapshots from repeated clicks within
+    // 60 seconds. Existing history is never overwritten. Scoped to the
+    // currently connected channel_id so that switching channels and
+    // syncing right away is never mistaken for a duplicate of the
+    // *previous* channel's last snapshot.
+    const [recentRows] = await db.query(
+      `SELECT follower_metric_id, recorded_at, follower_count
+       FROM follower_metrics
+       WHERE user_id = ?
+         AND platform_id = ?
+         AND channel_id = ?
+         AND recorded_at >= (NOW() - INTERVAL 60 SECOND)
+       ORDER BY recorded_at DESC
+       LIMIT 1`,
+      [user.user_id, platformId, user.youtube_channel_id]
+    );
+
+    if (recentRows.length > 0) {
+      return res.status(200).json({
+        message: "YouTube subscribers were synced recently. No duplicate snapshot was created.",
+        duplicate: true,
+        recorded_at: recentRows[0].recorded_at,
+        follower_count: Number(recentRows[0].follower_count),
+      });
+    }
+
+    let stats;
+    try {
+      stats = await youtubeService.getChannelStatistics(user.youtube_channel_id);
+    } catch (error) {
+      if (error instanceof youtubeService.YouTubeServiceError) {
+        return res.status(error.status).json({
+          message: error.message,
+          code: error.code,
+        });
+      }
+      throw error;
+    }
+
+    if (stats.subscriberCount === null || !Number.isInteger(stats.subscriberCount) || stats.subscriberCount < 0) {
+      return res.status(422).json({
+        message: "YouTube subscriber count is unavailable for this channel. The channel may have hidden its subscriber count.",
+        code: "SUBSCRIBER_COUNT_UNAVAILABLE",
+      });
+    }
+
+        const [result] = await db.query(
+      `INSERT INTO follower_metrics
+        (user_id, platform_id, channel_id, recorded_at, follower_count)
+       VALUES (?, ?, ?, NOW(), ?)`,
+      [user.user_id, platformId, user.youtube_channel_id, stats.subscriberCount]
+    );
+
+    const [savedRows] = await db.query(
+      `SELECT recorded_at, follower_count
+       FROM follower_metrics
+       WHERE follower_metric_id = ?
+       LIMIT 5`,
+      [result.insertId]
+    );
+
+    res.status(201).json({
+      message: "YouTube subscribers synced successfully.",
+      duplicate: false,
+      follower_metric_id: result.insertId,
+      recorded_at: savedRows[0].recorded_at,
+      follower_count: Number(savedRows[0].follower_count),
+    });
+  })
+);
+
+// =======================================================================
+// FOLLOWER ANALYTICS
+// Returns YouTube subscriber history and growth calculated from stored
+// snapshots. No follower/subscriber count is accepted from the client.
+//
+// Scoped to users.youtube_channel_id (the currently connected channel) so
+// that switching channels can never blend one channel's history into
+// another's "current"/"previous"/growth figures. Older snapshots that
+// belong to a channel that is no longer connected are NOT deleted — they
+// simply stop appearing here, because they are no longer the active
+// channel's history. See channel_id on follower_metrics.
+// =======================================================================
+
+app.get(
+  "/api/analytics/followers",
+  asyncHandler(async (req, res) => {
+    const [userRows] = await db.query(
+      `SELECT user_id, youtube_channel_id FROM users WHERE user_id = ? LIMIT 1`,
+      [DEFAULT_USER_ID]
+    );
+
+    if (userRows.length === 0) {
+      return res.status(404).json({
+        message: "Default creator/user was not found.",
+        code: "USER_NOT_FOUND",
+      });
+    }
+
+    const user = userRows[0];
+
+    const [platformRows] = await db.query(
+      `SELECT platform_id
+       FROM platforms
+       WHERE LOWER(platform_name) = 'youtube'
+         AND is_active = 1
+       LIMIT 1`
+    );
+
+    if (platformRows.length === 0) {
+      return res.status(500).json({
+        message: "The YouTube platform is not configured in the database.",
+        code: "YOUTUBE_PLATFORM_NOT_CONFIGURED",
+      });
+    }
+
+    // No channel configured at all — an explicit disconnected state, not
+    // zero subscribers and not stale data from whatever was connected before.
+    if (!user.youtube_channel_id) {
+      return res.json({
+        connected: false,
+        channelId: null,
+        currentSubscribers: null,
+        previousSubscribers: null,
+        subscriberGrowth: null,
+        growthRate: null,
+        history: [],
+      });
+    }
+
+    const [rows] = await db.query(
+      `SELECT recorded_at, follower_count
+       FROM follower_metrics
+       WHERE user_id = ?
+         AND platform_id = ?
+         AND channel_id = ?
+       ORDER BY recorded_at ASC`,
+      [DEFAULT_USER_ID, platformRows[0].platform_id, user.youtube_channel_id]
+    );
+
+    const history = rows.map((row) => ({
+      recorded_at: row.recorded_at,
+      follower_count: Number(row.follower_count),
+    }));
+
+    const current = history.length >= 1 ? history[history.length - 1].follower_count : null;
+    const previous = history.length >= 2 ? history[history.length - 2].follower_count : null;
+
+    let subscriberGrowth = null;
+    let growthRate = null;
+
+    if (current !== null && previous !== null) {
+      subscriberGrowth = current - previous;
+      growthRate = previous === 0
+        ? null
+        : Number(((subscriberGrowth / previous) * 100).toFixed(2));
+    }
+
+    res.json({
+      connected: true,
+      channelId: user.youtube_channel_id,
+      currentSubscribers: current,
+      previousSubscribers: previous,
+      subscriberGrowth,
+      growthRate,
+      history,
+    });
+  })
+);
+
+// =======================================================================
+// YOUTUBE CHANNEL CONNECTION
+// Manages which single YouTube channel is "connected" — the only source
+// of truth is users.youtube_channel_id, written here and nowhere else.
+// There is no OAuth in this app: connecting a channel means providing its
+// public channel ID, which is verified against the real YouTube API
+// before being saved (so a typo or fake ID can never silently become
+// "connected"). No tokens/keys/secrets are ever returned to the client.
+// =======================================================================
+
+// Connect a channel for the first time, or switch to a different one.
+// Existing follower_metrics/performance_metrics history is untouched —
+// it stays tagged to whichever channel_id it was actually recorded under.
+app.post(
+  "/api/youtube/channel",
+  asyncHandler(async (req, res) => {
+    const rawChannelId = (req.body || {}).channel_id;
+    const channelId = typeof rawChannelId === "string" ? rawChannelId.trim() : "";
+
+    if (!channelId) {
+      return res.status(400).json({
+        message: "A YouTube channel ID is required.",
+        code: "CHANNEL_ID_REQUIRED",
+      });
+    }
+
+    // Confirms the ID is well-formed AND belongs to a real, public
+    // channel before we ever write it — never trust the client's input
+    // as-is. This is the same lookup the sync route and the status route
+    // use, so "connected" always means "YouTube confirmed this channel."
+    let info;
+    try {
+      info = await youtubeService.getChannelStatistics(channelId);
+    } catch (error) {
+      if (error instanceof youtubeService.YouTubeServiceError) {
+        return res.status(error.status).json({
+          message: error.message,
+          code: error.code,
+        });
+      }
+      throw error;
+    }
+
+    await db.query(
+      `UPDATE users SET youtube_channel_id = ? WHERE user_id = ?`,
+      [info.channelId, DEFAULT_USER_ID]
+    );
+
+    res.json({
+      connected: true,
+      channelId: info.channelId,
+      channelName: info.channelName,
+      message: "YouTube channel connected.",
+    });
+  })
+);
+
+// Disconnect the active channel. Per the architecture rules: this clears
+// the active connection only — it never deletes follower_metrics or
+// performance_metrics history.
+app.delete(
+  "/api/youtube/channel",
+  asyncHandler(async (req, res) => {
+    await db.query(
+      `UPDATE users SET youtube_channel_id = NULL WHERE user_id = ?`,
+      [DEFAULT_USER_ID]
+    );
+
+    res.json({
+      connected: false,
+      channelId: null,
+      channelName: null,
+      message: "YouTube channel disconnected. Historical analytics were kept.",
+    });
+  })
+);
+
+// Diagnostic status check — lets the frontend confirm which channel the
+// backend currently considers "connected" without needing to guess from
+// stale local state.
+
+app.get(
+  "/api/youtube/connection",
+  asyncHandler(async (req, res) => {
+    const [userRows] = await db.query(
+      `SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 1`,
+      [DEFAULT_USER_ID]
+    );
+
+    if (userRows.length === 0 || !userRows[0].youtube_channel_id) {
+      return res.json({ connected: false, channelId: null, channelName: null });
+    }
+
+    const channelId = userRows[0].youtube_channel_id;
+
+    try {
+      const info = await youtubeService.getChannelStatistics(channelId);
+      return res.json({
+        connected: true,
+        channelId: info.channelId,
+        channelName: info.channelName,
+      });
+    } catch (error) {
+      if (error instanceof youtubeService.YouTubeServiceError) {
+        // A channel ID is configured but YouTube can't currently confirm
+        // it (bad ID, quota, network) — report that plainly instead of
+        // pretending the connection is healthy.
+        return res.json({
+          connected: false,
+          channelId,
+          channelName: null,
+          error: error.message,
+        });
+      }
+      throw error;
+    }
+  })
+);
+
+// =======================================================================
 // ANALYTICS (read-only aggregation over performance_metrics)
 // =======================================================================
 
 app.get(
   "/analytics/summary",
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query(`
+    // PART 4: only ever total up YouTube metrics recorded under the
+    // currently connected channel — see YT_CHANNEL_SCOPE_SQL above.
+    const scoped = await hasChannelScopingColumn();
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+
+    const [rows] = await db.query(
+      `
       SELECT
-        COALESCE(SUM(views), 0) AS total_views,
-        COALESCE(SUM(likes), 0) AS total_likes,
-        COALESCE(SUM(comments), 0) AS total_comments,
-        COALESCE(SUM(shares), 0) AS total_shares,
+        COALESCE(SUM(pm.views), 0) AS total_views,
+        COALESCE(SUM(pm.likes), 0) AS total_likes,
+        COALESCE(SUM(pm.comments), 0) AS total_comments,
+        COALESCE(SUM(pm.shares), 0) AS total_shares,
         COALESCE(ROUND(AVG(
-          CASE WHEN views = 0 THEN 0 ELSE (likes + comments + shares) / views * 100 END
+          CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
         ), 2), 0) AS average_engagement_rate
-      FROM performance_metrics
-    `);
+      FROM performance_metrics pm
+      JOIN platforms p ON p.platform_id = pm.platform_id
+      ${scoped ? `WHERE ${YT_CHANNEL_SCOPE_SQL}` : ""}
+      `,
+      scoped ? [currentChannelId] : []
+    );
     res.json(castNumbers(rows[0], ["total_views", "total_likes", "total_comments", "total_shares", "average_engagement_rate"]));
   })
 );
@@ -726,6 +1644,12 @@ app.get(
   "/analytics/top-content",
   asyncHandler(async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 5, 50);
+
+    // PART 4: exclude YouTube metrics linked under a channel that isn't
+    // the one currently connected — see YT_CHANNEL_SCOPE_SQL above.
+    const scoped = await hasChannelScopingColumn();
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+
     const [rows] = await db.query(
       `
       SELECT
@@ -738,10 +1662,11 @@ app.get(
       FROM performance_metrics pm
       JOIN content c ON c.content_id = pm.content_id
       JOIN platforms p ON p.platform_id = pm.platform_id
+      ${scoped ? `WHERE ${YT_CHANNEL_SCOPE_SQL}` : ""}
       ORDER BY engagement_rate DESC
       LIMIT ?
       `,
-      [limit]
+      scoped ? [currentChannelId, limit] : [limit]
     );
     res.json(castNumbersAll(rows, ["views", "likes", "comments", "shares", "engagement_rate"]));
   })
@@ -750,7 +1675,17 @@ app.get(
 app.get(
   "/analytics/platform-performance",
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query(`
+    // PART 4: the join condition (not a WHERE clause) is what has to
+    // carry the channel scope here — this query LEFT JOINs FROM
+    // platforms so that a platform with zero rows still shows a 0 row;
+    // putting the filter in WHERE instead would turn that LEFT JOIN
+    // back into an effective INNER JOIN and drop platforms with no
+    // *currently-scoped* data instead of just zeroing their totals.
+    const scoped = await hasChannelScopingColumn();
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+
+    const [rows] = await db.query(
+      `
       SELECT
         p.platform_id, p.platform_name,
         COALESCE(SUM(pm.views), 0) AS total_views,
@@ -761,10 +1696,14 @@ app.get(
           CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
         ), 2), 0) AS average_engagement_rate
       FROM platforms p
-      LEFT JOIN performance_metrics pm ON pm.platform_id = p.platform_id
+      LEFT JOIN performance_metrics pm
+        ON pm.platform_id = p.platform_id
+        ${scoped ? `AND ${YT_CHANNEL_SCOPE_SQL}` : ""}
       GROUP BY p.platform_id, p.platform_name
       ORDER BY p.platform_name
-    `);
+      `,
+      scoped ? [currentChannelId] : []
+    );
     res.json(castNumbersAll(rows, ["total_views", "total_likes", "total_comments", "total_shares", "average_engagement_rate"]));
   })
 );
@@ -772,20 +1711,359 @@ app.get(
 app.get(
   "/analytics/performance-over-time",
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query(`
+    // PART 4/6: same channel scoping as the other analytics endpoints —
+    // needs a platforms join (this query previously had none) purely to
+    // evaluate that condition.
+    const scoped = await hasChannelScopingColumn();
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+
+    const [rows] = await db.query(
+      `
       SELECT
-        DATE(recorded_at) AS date,
-        COALESCE(SUM(views), 0) AS views,
-        COALESCE(SUM(likes), 0) AS likes,
-        COALESCE(SUM(comments), 0) AS comments,
-        COALESCE(SUM(shares), 0) AS shares
-      FROM performance_metrics
-      GROUP BY DATE(recorded_at)
+        DATE(pm.recorded_at) AS date,
+        COALESCE(SUM(pm.views), 0) AS views,
+        COALESCE(SUM(pm.likes), 0) AS likes,
+        COALESCE(SUM(pm.comments), 0) AS comments,
+        COALESCE(SUM(pm.shares), 0) AS shares
+      FROM performance_metrics pm
+      JOIN platforms p ON p.platform_id = pm.platform_id
+      ${scoped ? `WHERE ${YT_CHANNEL_SCOPE_SQL}` : ""}
+      GROUP BY DATE(pm.recorded_at)
       ORDER BY date ASC
-    `);
+      `,
+      scoped ? [currentChannelId] : []
+    );
     res.json(castNumbersAll(rows, ["views", "likes", "comments", "shares"]));
   })
 );
+
+// =======================================================================
+// POSTING CONSISTENCY ANALYTICS
+// Rule-based (no AI/ML): a scheduled item only ever counts as Published
+// or Missed once its deadline has passed — Cancelled items are excluded
+// entirely, and Scheduled items whose date hasn't passed yet aren't
+// eligible either. updateMissedScheduledContent() runs first so every
+// route below always reflects the current, automatically-detected state.
+//
+//   consistency % = published / (published + missed) * 100
+//
+// Never divides by zero — an empty eligible set returns null, not 0.
+// =======================================================================
+
+app.get(
+  "/analytics/consistency",
+  asyncHandler(async (req, res) => {
+    await updateMissedScheduledContent();
+
+    const { start, end } = req.query;
+    const params = [];
+    let sql = `
+      SELECT status, COUNT(*) AS count
+      FROM scheduled_content
+      WHERE status IN ('Published', 'Missed')
+    `;
+    if (start) {
+      sql += " AND scheduled_date >= ?";
+      params.push(start);
+    }
+    if (end) {
+      sql += " AND scheduled_date <= ?";
+      params.push(end);
+    }
+    sql += " GROUP BY status";
+
+    const [rows] = await db.query(sql, params);
+
+    let publishedCount = 0;
+    let missedCount = 0;
+    for (const row of rows) {
+      if (row.status === "Published") publishedCount = Number(row.count);
+      if (row.status === "Missed") missedCount = Number(row.count);
+    }
+
+    const eligibleContent = publishedCount + missedCount;
+    const consistencyPercentage =
+      eligibleContent === 0
+        ? null
+        : Number(((publishedCount / eligibleContent) * 100).toFixed(2));
+
+    res.json({
+      eligibleContent,
+      publishedCount,
+      missedCount,
+      consistencyPercentage,
+    });
+  })
+);
+
+app.get(
+  "/analytics/consistency/by-platform",
+  asyncHandler(async (req, res) => {
+    await updateMissedScheduledContent();
+
+    const [rows] = await db.query(`
+      SELECT
+        p.platform_id, p.platform_name,
+        SUM(CASE WHEN sc.status = 'Published' THEN 1 ELSE 0 END) AS publishedCount,
+        SUM(CASE WHEN sc.status = 'Missed' THEN 1 ELSE 0 END) AS missedCount
+      FROM scheduled_content sc
+      JOIN platforms p ON p.platform_id = sc.platform_id
+      WHERE sc.status IN ('Published', 'Missed')
+      GROUP BY p.platform_id, p.platform_name
+      ORDER BY p.platform_name
+    `);
+
+    const result = rows.map((row) => {
+      const publishedCount = Number(row.publishedCount);
+      const missedCount = Number(row.missedCount);
+      const eligible = publishedCount + missedCount;
+      return {
+        platform: row.platform_name,
+        publishedCount,
+        missedCount,
+        consistencyPercentage:
+          eligible === 0 ? null : Number(((publishedCount / eligible) * 100).toFixed(2)),
+      };
+    });
+
+    res.json(result);
+  })
+);
+
+app.get(
+  "/analytics/consistency/trend",
+  asyncHandler(async (req, res) => {
+    await updateMissedScheduledContent();
+
+    // Only "week" or "month" are supported; anything else falls back to month.
+    const groupBy = req.query.groupBy === "week" ? "week" : "month";
+    const periodExpr =
+      groupBy === "week"
+        ? "YEARWEEK(scheduled_date, 3)" // ISO-8601 week
+        : "DATE_FORMAT(scheduled_date, '%Y-%m')";
+
+    const [rows] = await db.query(`
+      SELECT
+        ${periodExpr} AS period_key,
+        MIN(scheduled_date) AS period_start,
+        SUM(CASE WHEN status = 'Published' THEN 1 ELSE 0 END) AS publishedCount,
+        SUM(CASE WHEN status = 'Missed' THEN 1 ELSE 0 END) AS missedCount
+      FROM scheduled_content
+      WHERE status IN ('Published', 'Missed')
+      GROUP BY period_key
+      ORDER BY period_key ASC
+    `);
+
+    const result = rows.map((row) => {
+      const publishedCount = Number(row.publishedCount);
+      const missedCount = Number(row.missedCount);
+      const eligible = publishedCount + missedCount;
+      return {
+        // "period_start" is the earliest scheduled_date in that bucket —
+        // used as a readable label for the chart (no fabricated history,
+        // only real buckets that actually contain eligible data).
+        period:
+          groupBy === "week"
+            ? String(row.period_start).slice(0, 10)
+            : String(row.period_start).slice(0, 7),
+        publishedCount,
+        missedCount,
+        consistencyPercentage:
+          eligible === 0 ? null : Number(((publishedCount / eligible) * 100).toFixed(2)),
+      };
+    });
+
+    res.json(result);
+  })
+);
+
+// =======================================================================
+// DASHBOARD SUMMARY
+//
+// One endpoint that gives the dashboard everything it needs in a single
+// request, instead of the frontend firing off five separate calls. It
+// only reads existing tables via existing patterns (DEFAULT_USER_ID,
+// updateMissedScheduledContent, the youtube_channel_id/follower_metrics
+// pair, performance_metrics) — nothing new is written here.
+//
+// STATUS NOTE: content.status is not a reliable "is this draft/scheduled/
+// published" signal in this schema — it's set once at creation (always
+// 'draft') and nothing in the app ever updates it afterwards. The real,
+// UI-driven signal for "has this gone out yet" is scheduled_content.status
+// (the same field the calendar and /analytics/consistency already treat
+// as authoritative), so contentSummary is derived from that instead:
+//   - Published: has at least one scheduled_content row with status
+//     'Published' (if it went out on any platform, it counts as published)
+//   - Scheduled: no Published row, but has at least one 'Scheduled' row
+//     whose date hasn't passed
+//   - Draft: everything else — including content with a 'Missed' row and
+//     nothing else, since a missed slot isn't a live "Scheduled" state and
+//     there's no dedicated Missed bucket in this 4-card layout
+// =======================================================================
+
+app.get(
+  "/dashboard/summary",
+  asyncHandler(async (req, res) => {
+    await updateMissedScheduledContent();
+
+    // ---- Content summary (single query, EXISTS-based per the note above) ----
+    const [[contentSummaryRow]] = await db.query(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE
+              WHEN EXISTS (
+                SELECT 1 FROM scheduled_content sc
+                WHERE sc.content_id = c.content_id AND sc.status = 'Published'
+              ) THEN 1 ELSE 0
+            END) AS published,
+        SUM(CASE
+              WHEN NOT EXISTS (
+                SELECT 1 FROM scheduled_content sc
+                WHERE sc.content_id = c.content_id AND sc.status = 'Published'
+              )
+              AND EXISTS (
+                SELECT 1 FROM scheduled_content sc
+                WHERE sc.content_id = c.content_id AND sc.status = 'Scheduled'
+              ) THEN 1 ELSE 0
+            END) AS scheduled
+      FROM content c
+    `);
+
+    const total = Number(contentSummaryRow.total) || 0;
+    const published = Number(contentSummaryRow.published) || 0;
+    const scheduled = Number(contentSummaryRow.scheduled) || 0;
+    const draft = total - published - scheduled;
+
+    // ---- Upcoming content (next 5 future items, grouped by CONTENT) ----
+    // The same piece of content is often scheduled on several platforms
+    // (several scheduled_content rows sharing one content_id). Fetched
+    // ungrouped here — LIMIT is applied after grouping below, otherwise
+    // "5 rows" could all be the same content item on 5 platforms while a
+    // genuinely different upcoming item never appears.
+    const [upcomingRawRows] = await db.query(`
+      SELECT
+        sc.content_id, sc.scheduled_date,
+        c.title AS content_title, c.content_type,
+        p.platform_name
+      FROM scheduled_content sc
+      JOIN content c ON c.content_id = sc.content_id
+      JOIN platforms p ON p.platform_id = sc.platform_id
+      WHERE sc.status = 'Scheduled' AND sc.scheduled_date >= NOW()
+      ORDER BY sc.scheduled_date ASC
+    `);
+
+    const upcomingGroupsById = new Map();
+    for (const row of upcomingRawRows) {
+      if (!upcomingGroupsById.has(row.content_id)) {
+        upcomingGroupsById.set(row.content_id, {
+          content_id: row.content_id,
+          content_title: row.content_title,
+          content_type: row.content_type,
+          platforms: [],
+        });
+      }
+      upcomingGroupsById.get(row.content_id).platforms.push({
+        platform_name: row.platform_name,
+        scheduled_date: row.scheduled_date,
+      });
+    }
+
+    const upcomingContent = Array.from(upcomingGroupsById.values())
+      .map((group) => {
+        const earliestDate = group.platforms.reduce(
+          (earliest, p) =>
+            !earliest || new Date(p.scheduled_date) < new Date(earliest) ? p.scheduled_date : earliest,
+          null
+        );
+        // If every platform shares the same date, surface it once as a
+        // single top-level date; otherwise leave it null so the frontend
+        // shows each platform's own date instead of a misleading shared one.
+        const uniqueDates = new Set(group.platforms.map((p) => String(p.scheduled_date)));
+        return {
+          content_id: group.content_id,
+          content_title: group.content_title,
+          content_type: group.content_type,
+          scheduled_date: uniqueDates.size === 1 ? group.platforms[0].scheduled_date : null,
+          earliest_scheduled_date: earliestDate,
+          platforms: group.platforms,
+        };
+      })
+      .sort((a, b) => new Date(a.earliest_scheduled_date) - new Date(b.earliest_scheduled_date))
+      .slice(0, 5);
+
+    // ---- Platform overview ----
+    const [userRows] = await db.query(
+      "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 5",
+      [DEFAULT_USER_ID]
+    );
+    const youtubeChannelId = userRows[0] && userRows[0].youtube_channel_id;
+
+    let youtubeSubscriberCount = null;
+    if (youtubeChannelId) {
+      const [ytPlatformRows] = await db.query(
+        "SELECT platform_id FROM platforms WHERE LOWER(platform_name) = 'youtube' LIMIT 5"
+      );
+      if (ytPlatformRows.length > 0) {
+        const [latestFollowerRows] = await db.query(
+          `SELECT follower_count FROM follower_metrics
+           WHERE user_id = ? AND platform_id = ?
+           ORDER BY recorded_at DESC LIMIT 5`,
+          [DEFAULT_USER_ID, ytPlatformRows[0].platform_id]
+        );
+        if (latestFollowerRows.length > 0) {
+          youtubeSubscriberCount = Number(latestFollowerRows[0].follower_count);
+        }
+      }
+    }
+
+    const platforms = {
+      youtube: {
+        connected: Boolean(youtubeChannelId),
+        hasData: youtubeSubscriberCount !== null,
+        subscriberCount: youtubeSubscriberCount,
+      },
+      // No TikTok/Instagram integration exists yet (see project scope) —
+      // these are never fetched from any API and never show a number.
+      tiktok: { connected: false, available: false },
+      instagram: { connected: false, available: false },
+    };
+
+    // ---- Recent performance snapshot (single most recent metric row) ----
+    // PART 4: applies the same current-channel scoping as the Analytics
+    // page (see YT_CHANNEL_SCOPE_SQL above) so this card can never show a
+    // previously-connected channel's metrics as if they were current.
+    const scopedForSnapshot = await hasChannelScopingColumn();
+    const snapshotChannelId = scopedForSnapshot ? youtubeChannelId : null;
+    const [latestPerfRows] = await db.query(
+      `${PERFORMANCE_SELECT} ${scopedForSnapshot ? `WHERE ${YT_CHANNEL_SCOPE_SQL}` : ""}
+       ORDER BY pm.recorded_at DESC LIMIT 5`,
+      scopedForSnapshot ? [snapshotChannelId] : []
+    );
+    const latestPerformance = latestPerfRows.length > 0
+      ? castNumbers(latestPerfRows[0], ["views", "likes", "comments", "shares", "engagement_rate"])
+      : null;
+
+    res.json({
+      contentSummary: { total, draft, scheduled, published },
+      upcomingContent,
+      platforms,
+      latestPerformance,
+    });
+  })
+);
+
+// =======================================================================
+// 404 HANDLER (must be registered after every route above, and before
+// the error handler below). Anything reaching this point matched no
+// static frontend file and no API route. Returning JSON here — instead
+// of Express's default HTML "Cannot GET ..." page — means a future
+// route typo/mismatch surfaces to the frontend as a normal JSON error it
+// can display, not as "Unexpected token '<', "<!DOCTYPE"... is not
+// valid JSON".
+// =======================================================================
+app.use((req, res) => {
+  res.status(404).json({ message: `No route found for ${req.method} ${req.originalUrl}` });
+});
 
 // =======================================================================
 // ERROR HANDLING (must be registered last)

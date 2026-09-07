@@ -221,63 +221,58 @@
             pointer-events: none;
         }
 
-        /* ---- Add/Edit metric modal (wider variant of the shared .modal) ---- */
-        .metric-modal-content {
-            background: #fff6ee;
-            margin: 6% auto;
-            padding: 24px;
-            width: 90%;
-            max-width: 480px;
-            border-radius: 10px;
+        .analytics-card-header a {
+            color: inherit;
+            text-decoration: underline;
         }
 
-        .modal.active {
-            display: block;
+        /* ---- Posting consistency ---- */
+        .consistency-summary {
+            display: flex;
+            align-items: center;
+            gap: 32px;
+            flex-wrap: wrap;
+            margin: 6px 0 10px;
         }
 
-        .modal {
-            display: none;
+        .consistency-percentage {
+            font-size: 42px;
+            font-weight: 700;
+            color: #313135;
+            min-width: 110px;
         }
 
-        .metric-form {
+        .consistency-counts {
+            display: flex;
+            gap: 24px;
+        }
+
+        .consistency-count-item {
             display: flex;
             flex-direction: column;
-            gap: 12px;
-            margin-top: 10px;
         }
 
-        .metric-form label {
+        .consistency-count-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: #313135;
+        }
+
+        .consistency-count-label {
+            font-size: 12px;
+            color: #7a6f6f;
+        }
+
+        .consistency-note {
+            margin: 0 0 14px;
+            color: #7a6f6f;
             font-size: 13px;
-            font-weight: 600;
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
         }
 
-        .metric-form select,
-        .metric-form input {
-            padding: 9px 10px;
+        .consistency-subheading {
+            margin: 18px 0 8px;
             font-size: 14px;
-            font-weight: 400;
-        }
-
-        .metric-form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-        }
-
-        .metric-form-error {
-            color: #CD201F;
-            font-size: 13px;
-            min-height: 16px;
-        }
-
-        .metric-form-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 8px;
-            margin-top: 6px;
+            color: #313135;
         }
 
         @media (max-width: 1100px) {
@@ -289,10 +284,6 @@
         @media (max-width: 650px) {
             .analytics-grid {
                 grid-template-columns: repeat(2, 1fr);
-            }
-
-            .metric-form-row {
-                grid-template-columns: 1fr;
             }
 
             .top-content-item {
@@ -351,15 +342,139 @@
                     <div class="metric-label">Total Comments</div>
                     <div class="metric-value" id="kpiComments">—</div>
                 </div>
-                <div class="metric-card">
-                    <div class="metric-label">Total Shares</div>
-                    <div class="metric-value" id="kpiShares">—</div>
-                </div>
+                
                 <div class="metric-card">
                     <div class="metric-label">Avg. Engagement Rate</div>
                     <div class="metric-value" id="kpiEngagement">—</div>
                 </div>
             </div>
+
+            <!-- POSTING CONSISTENCY -->
+            <section class="analytics-card">
+                <h3>Posting Consistency</h3>
+                <p>How reliably scheduled content actually gets published, based on completed publishing deadlines.</p>
+
+                <div id="consistencySummary" class="consistency-summary">
+                    <div class="consistency-percentage" id="consistencyPercentage">—</div>
+                    <div class="consistency-counts">
+                        <div class="consistency-count-item">
+                            <span class="consistency-count-value" id="consistencyPublished">0</span>
+                            <span class="consistency-count-label">Published</span>
+                        </div>
+                        <div class="consistency-count-item">
+                            <span class="consistency-count-value" id="consistencyMissed">0</span>
+                            <span class="consistency-count-label">Missed</span>
+                        </div>
+                    </div>
+                </div>
+                <p class="consistency-note" id="consistencyNote">Based on completed scheduled publishing deadlines. Cancelled items are never counted against you.</p>
+                <div id="consistencyEmpty" class="empty-state" style="display:none;">
+                    No completed publishing deadlines yet.
+                </div>
+
+                <h4 class="consistency-subheading">By Platform</h4>
+                <div class="table-wrap">
+                    <table class="analytics-table">
+                        <thead>
+                            <tr>
+                                <th>Platform</th>
+                                <th>Published</th>
+                                <th>Missed</th>
+                                <th>Consistency</th>
+                            </tr>
+                        </thead>
+                        <tbody id="consistencyPlatformTableBody"></tbody>
+                    </table>
+                    <div id="consistencyPlatformEmpty" class="empty-state" style="display:none;">
+                        No platform-level data yet.
+                    </div>
+                </div>
+
+                <h4 class="consistency-subheading">Consistency Over Time</h4>
+                <div class="chart-wrap" style="height:200px;">
+                    <canvas id="consistencyTrendChart"></canvas>
+                    <div id="consistencyTrendEmpty" class="empty-state" style="display:none;">
+                        Not enough history yet to show a trend.
+                    </div>
+                </div>
+            </section>
+
+            <!-- YOUTUBE SUBSCRIBERS -->
+            <section class="analytics-card youtube-subscriber-card">
+                <div class="analytics-card-header">
+                    <div>
+                        <h3>YouTube Subscribers</h3>
+                        <p>Public subscriber data synced directly from your connected YouTube channel.</p>
+                    </div>
+                    <button id="syncSubscribersBtn" type="button">Sync YouTube Subscribers</button>
+                </div>
+
+                <!-- YouTube account connection (Google OAuth). Identifies the
+                     creator's channel automatically — nothing here accepts a
+                     typed-in channel ID or exposes a token. -->
+                <div class="youtube-connect-row">
+                    <span id="youtubeConnectionBadge" class="youtube-connection-badge youtube-connection-badge--checking">
+                        Checking YouTube connection…
+                    </span>
+                    <button id="connectYoutubeAccountBtn" type="button" class="youtube-connect-btn is-hidden">
+                        Connect YouTube
+                    </button>
+                </div>
+                <div id="youtubeConnectionMessage" class="subscriber-sync-message" role="status" aria-live="polite"></div>
+
+                <div id="youtubeConnectionStatus" class="subscriber-sync-message"></div>
+                                <!-- YOUTUBE CHANNEL CONNECTION — which channel's public data
+                     everything below (and the sync button above) is sourced
+                     from. Reuses the .youtube-link-section styles already
+                     defined for the Content Planner's video-connect flow. -->
+                <div id="youtubeChannelSection" class="youtube-link-section">
+                    <p class="youtube-link-heading">YouTube Channel</p>
+
+                    <div id="youtubeChannelConnectForm" class="youtube-connect-form">
+                        <input id="youtubeChannelIdInput" type="text" placeholder="Channel ID (starts with UC…)">
+                        <button type="button" id="connectChannelBtn">Connect</button>
+                    </div>
+
+                    <div id="youtubeChannelLinkedInfo" class="youtube-linked-info" style="display:none;">
+                        <p class="youtube-video-id">Connected: <span id="youtubeChannelNameText"></span> (<span id="youtubeChannelIdText"></span>)</p>
+                        <div class="youtube-linked-actions">
+                            <button type="button" id="switchChannelBtn">Switch Channel</button>
+                            <button type="button" id="disconnectChannelBtn">Disconnect</button>
+                        </div>
+                    </div>
+
+                    <p id="youtubeChannelError" class="youtube-link-error"></p>
+                </div>
+
+                <div class="subscriber-stats-grid">
+                    <div class="subscriber-stat">
+                        <div class="metric-label">Current Subscribers</div>
+                        <div class="metric-value" id="subscriberCurrent">—</div>
+                    </div>
+                    <div class="subscriber-stat">
+                        <div class="metric-label">Growth Since Last Sync</div>
+                        <div class="metric-value" id="subscriberGrowth">N/A</div>
+                    </div>
+                    <div class="subscriber-stat">
+                        <div class="metric-label">Growth Rate</div>
+                        <div class="metric-value" id="subscriberGrowthRate">N/A</div>
+                    </div>
+                    <div class="subscriber-stat">
+                        <div class="metric-label">All-Time Growth</div>
+                        <div class="metric-value" id="subscriberAllTimeGrowth">N/A</div>
+                    </div>
+                </div>
+
+                <div id="subscriberSyncMessage" class="subscriber-sync-message" role="status" aria-live="polite"></div>
+
+                <div class="subscriber-chart-heading">Subscriber History</div>
+                <div class="chart-wrap">
+                    <canvas id="subscriberChart"></canvas>
+                    <div id="subscriberEmpty" class="empty-state" style="display:none;">
+                        Subscriber history will appear after multiple syncs.
+                    </div>
+                </div>
+            </section>
 
             <!-- PERFORMANCE OVER TIME -->
             <section class="analytics-card">
@@ -408,14 +523,13 @@
                 </div>
             </section>
 
-            <!-- PERFORMANCE METRICS MANAGEMENT -->
+            <!-- PERFORMANCE METRICS (read-only — synced from platform APIs) -->
             <section class="analytics-card">
                 <div class="analytics-card-header">
                     <div>
                         <h3>Performance Data</h3>
-                        <p>Add, edit, or remove the performance records analytics is built from.</p>
+                        <p>Synced automatically from each platform's API. To link or sync a video's analytics, open its scheduled item on the <a href="calendar.html">Content Planner</a> and use "Connect YouTube Video".</p>
                     </div>
-                    <button id="addMetricBtn" type="button">+ Add Metric</button>
                 </div>
                 <div class="table-wrap">
                     <table class="analytics-table">
@@ -436,63 +550,12 @@
                     </table>
                     <div id="metricsEmpty" class="empty-state" style="display:none;">
                         No performance data available yet.<br>
-                        Click "+ Add Metric" to record your first performance data point.
+                        Connect a YouTube video from the Content Planner to sync your first data point.
                     </div>
                 </div>
             </section>
 
         </main>
-    </div>
-</div>
-
-<!-- ADD / EDIT METRIC MODAL -->
-<div id="metricModal" class="modal">
-    <div class="metric-modal-content">
-        <div class="event-header">
-            <h3 id="metricModalTitle">Add Performance Metric</h3>
-            <button type="button" id="closeMetricModal">X</button>
-        </div>
-
-        <form id="metricForm" class="metric-form">
-            <label>
-                Content
-                <select id="metricContent" required></select>
-            </label>
-
-            <label>
-                Platform
-                <select id="metricPlatform" required></select>
-            </label>
-
-            <div class="metric-form-row">
-                <label>
-                    Views
-                    <input type="number" id="metricViews" min="0" step="1" required>
-                </label>
-                <label>
-                    Likes
-                    <input type="number" id="metricLikes" min="0" step="1" required>
-                </label>
-            </div>
-
-            <div class="metric-form-row">
-                <label>
-                    Comments
-                    <input type="number" id="metricComments" min="0" step="1" required>
-                </label>
-                <label>
-                    Shares
-                    <input type="number" id="metricShares" min="0" step="1" required>
-                </label>
-            </div>
-
-            <div id="metricFormError" class="metric-form-error"></div>
-
-            <div class="metric-form-actions">
-                <button type="button" id="cancelMetricForm">Cancel</button>
-                <button type="submit" id="saveMetricBtn">Save</button>
-            </div>
-        </form>
     </div>
 </div>
 

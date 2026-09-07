@@ -35,7 +35,13 @@
     </div>
     <div class="bodyPanel">
 
-        
+        <div class="script-filter-bar" id="scriptFilterBar">
+            <button type="button" class="script-filter-btn active" data-status="all">All</button>
+            <button type="button" class="script-filter-btn" data-status="draft">Draft</button>
+            <button type="button" class="script-filter-btn" data-status="filmed">Filmed</button>
+            <button type="button" class="script-filter-btn" data-status="posted">Published</button>
+        </div>
+
     <div class="parent-bodyPanel">
         <div class="leftColumn">
 
@@ -53,7 +59,7 @@
    
 
 <!-- Add this inside the parent-bodyPanel before the carousel div -->
-<div class="loading-indicator" style="display: none; text-align: center; padding: 20px;">
+<div class="loading-indicator">
     Loading scripts...
 </div>
 
@@ -61,11 +67,6 @@
     <div class="carousel">
         Carousel
         <div class="preview"></div>
-    </div>
-    <div class="newFolder">
-        <button class="addFolder">
-            + Add Folder
-        </button>
     </div>
 
 

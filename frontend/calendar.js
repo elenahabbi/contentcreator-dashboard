@@ -142,6 +142,12 @@ function loadScheduledContent() {
                 if (!grouped[key]) grouped[key] = { ...item, platform_names: [] };
                 grouped[key].platform_names.push(item.platform_name);
                 grouped[key].schedule_ids = [...(grouped[key].schedule_ids || []), item.schedule_id];
+                // Parallel arrays (same index as platform_names/schedule_ids) —
+                // each scheduled_content row has its own external video link,
+                // so the group's top-level spread above isn't enough on its own.
+                grouped[key].external_content_ids = [...(grouped[key].external_content_ids || []), item.external_content_id || null];
+                grouped[key].external_content_urls = [...(grouped[key].external_content_urls || []), item.external_content_url || null];
+                grouped[key].computed_statuses = [...(grouped[key].computed_statuses || []), item.computed_status];
             });
 
             const todayDate = new Date();
@@ -335,8 +341,14 @@ async function saveScheduledContent() {
         });
 
         if (!scheduleRes.ok) {
-            const err = await scheduleRes.json();
-            throw new Error(err.message || "Failed to save scheduled content");
+            let message = "Failed to save scheduled content";
+            try {
+                const err = await scheduleRes.json();
+                if (err && err.message) message = err.message;
+            } catch (_) {
+                message = `Failed to save scheduled content (HTTP ${scheduleRes.status})`;
+            }
+            throw new Error(message);
         }
 
         alert("Event saved!");
@@ -379,6 +391,9 @@ function openScheduledModal(item) {
         return `<span style="padding:2px 6px; margin-right:4px; border-radius:4px; font-size:11px;">${p}</span>`;
     }).join("");
 
+    showPublishStatus("");
+    updatePublishButtons(item);
+
     fetch(`http://localhost:3000/scripts?content_id=${item.content_id}`)
         .then(res => res.json())
         .then(scripts => {
@@ -396,7 +411,291 @@ function openScheduledModal(item) {
             scriptContentEl.textContent = "";
             modal.style.display = "block";
         });
+
+    setupYoutubeLinkSection(item);
 }
+
+/* =======================================================================
+   YOUTUBE VIDEO LINK / SYNC (scheduled-item modal)
+   Views/likes/comments shown here always come from the YouTube API —
+   there is no field in this panel for typing analytics in by hand.
+   ======================================================================= */
+
+// Finds this group's YouTube-specific schedule_id + link, if it has one.
+function getYoutubeLinkForItem(item) {
+    const idx = item.platform_names.findIndex(p => p?.toLowerCase() === "youtube");
+    if (idx === -1) return null;
+    return {
+        scheduleId: item.schedule_ids[idx],
+        externalContentId: item.external_content_ids ? item.external_content_ids[idx] : null,
+        externalContentUrl: item.external_content_urls ? item.external_content_urls[idx] : null,
+        computedStatus: item.computed_statuses ? item.computed_statuses[idx] : item.computed_status,
+    };
+}
+
+// Shared feedback line for the Publish/Unpublish actions in the event
+// modal — reuses the same message styling already used for the YouTube
+// subscriber sync feedback on the Analytics page (.subscriber-sync-message
+// / .success / .error), so this never invents new UI styling.
+function showPublishStatus(text, variant) {
+    const statusMsg = document.getElementById("publishStatusMessage");
+    if (!statusMsg) return;
+    statusMsg.textContent = text;
+    statusMsg.className = `subscriber-sync-message${variant ? ` ${variant}` : ""}`;
+    statusMsg.style.display = text ? "block" : "none";
+}
+
+// Shows exactly one of "Mark Published" / "Unpublish" depending on the
+// group's current status, so the modal never keeps offering "Mark
+// Published" as though nothing happened after it already succeeded.
+function updatePublishButtons(item) {
+    const publishBtn = document.getElementById("publishEvent");
+    const unpublishBtn = document.getElementById("unpublishEvent");
+    if (!publishBtn || !unpublishBtn) return;
+    const isPublished = item && item.computed_status === "Published";
+    publishBtn.style.display = isPublished ? "none" : "inline-block";
+    unpublishBtn.style.display = isPublished ? "inline-block" : "none";
+}
+
+// Safely parses a fetch Response as JSON. Used for every response coming
+// back from the scheduled-content/YouTube-link routes so that an
+// unexpected non-JSON body (an HTML 404/500 error page from a route
+// mismatch, a proxy error, etc.) never surfaces to the user as a raw
+// "Unexpected token '<' ... is not valid JSON" — this checks res.ok
+// first and only tries to parse JSON where a body is actually expected.
+async function expectJson(res, fallbackMessage) {
+    if (!res.ok) {
+        let message = fallbackMessage;
+        try {
+            const body = await res.json();
+            if (body && body.message) message = body.message;
+        } catch (_) {
+            // Non-JSON error body (e.g. an HTML error page) — keep the
+            // fallback message instead of throwing a raw parse error.
+            message = `${fallbackMessage} (HTTP ${res.status})`;
+        }
+        throw new Error(message);
+    }
+
+    try {
+        return await res.json();
+    } catch (_) {
+        throw new Error(`${fallbackMessage} — the server did not return a valid response.`);
+    }
+}
+
+function escapeYoutubeText(value) {
+    return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+function setupYoutubeLinkSection(item) {
+    const section = document.getElementById("youtubeLinkSection");
+    const notPublishedNote = document.getElementById("youtubeNotPublishedNote");
+    const findForm = document.getElementById("youtubeFindForm");
+    const candidatesBox = document.getElementById("youtubeCandidates");
+    const candidatesList = document.getElementById("youtubeCandidatesList");
+    const noMatchBox = document.getElementById("youtubeNoMatch");
+    const linkedInfo = document.getElementById("youtubeLinkedInfo");
+    const errorEl = document.getElementById("youtubeLinkError");
+    const statsDisplay = document.getElementById("youtubeStatsDisplay");
+    if (!section) return;
+
+    errorEl.textContent = "";
+    statsDisplay.innerHTML = "";
+    candidatesList.innerHTML = "";
+
+    const link = getYoutubeLinkForItem(item);
+
+    if (!link) {
+        // No YouTube platform on this scheduled item at all — nothing to show.
+        section.style.display = "none";
+        return;
+    }
+
+    section.style.display = "block";
+
+    // Reset every sub-state, then show exactly one.
+    notPublishedNote.style.display = "none";
+    findForm.style.display = "none";
+    candidatesBox.style.display = "none";
+    noMatchBox.style.display = "none";
+    linkedInfo.style.display = "none";
+
+    if (link.externalContentId) {
+        linkedInfo.style.display = "block";
+        document.getElementById("youtubeVideoIdText").textContent = link.externalContentId;
+        return;
+    }
+
+    if (link.computedStatus !== "Published") {
+        notPublishedNote.style.display = "block";
+        return;
+    }
+
+    findForm.style.display = "block";
+}
+
+function renderYoutubeStats(stats) {
+    const statsDisplay = document.getElementById("youtubeStatsDisplay");
+    if (!statsDisplay) return;
+    statsDisplay.innerHTML = `
+        <span><strong>${Number(stats.views).toLocaleString()}</strong> views</span>
+        <span><strong>${Number(stats.likes).toLocaleString()}</strong> likes</span>
+        <span><strong>${Number(stats.comments).toLocaleString()}</strong> comments</span>
+        <span><strong>${stats.shares_available === false ? "—" : Number(stats.shares).toLocaleString()}</strong> shares</span>
+    `;
+}
+
+function renderYoutubeCandidates(candidates) {
+    document.getElementById("youtubeFindForm").style.display = "none";
+    document.getElementById("youtubeNoMatch").style.display = "none";
+    document.getElementById("youtubeCandidates").style.display = "block";
+
+    const list = document.getElementById("youtubeCandidatesList");
+    list.innerHTML = candidates.map((c, idx) => `
+        <div class="youtube-candidate-card" data-index="${idx}">
+            ${c.thumbnailUrl ? `<img class="youtube-candidate-thumb" src="${c.thumbnailUrl}" alt="">` : `<div class="youtube-candidate-thumb youtube-candidate-thumb--placeholder"></div>`}
+            <div class="youtube-candidate-info">
+                <div class="youtube-candidate-title">${escapeYoutubeText(c.title)}</div>
+                <div class="youtube-candidate-date">${c.publishedAt ? new Date(c.publishedAt).toLocaleDateString() : "Publish date unknown"}</div>
+            </div>
+            <button type="button" class="youtube-candidate-select-btn" data-index="${idx}">Select</button>
+        </div>
+    `).join("");
+
+    list.querySelectorAll(".youtube-candidate-select-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const candidate = candidates[Number(btn.dataset.index)];
+            if (candidate) selectYoutubeVideo(candidate.videoId);
+        });
+    });
+}
+
+async function runYoutubeVideoSearch() {
+    if (!currentModalItem) return;
+    const link = getYoutubeLinkForItem(currentModalItem);
+    const errorEl = document.getElementById("youtubeLinkError");
+    errorEl.textContent = "";
+    if (!link) return;
+
+    const findBtn = document.getElementById("findYoutubeVideoBtn");
+    const retryBtn = document.getElementById("retryYoutubeSearchBtn");
+    const againBtn = document.getElementById("findYoutubeVideoAgainBtn");
+    [findBtn, retryBtn, againBtn].forEach(b => { if (b) b.disabled = true; });
+
+    document.getElementById("youtubeFindForm").style.display = "none";
+    document.getElementById("youtubeCandidates").style.display = "none";
+    document.getElementById("youtubeNoMatch").style.display = "none";
+
+    try {
+        const res = await fetch(`http://localhost:3000/scheduled-content/${link.scheduleId}/find-youtube-video`, {
+            method: "POST",
+        });
+        const body = await expectJson(res, "Could not search YouTube for a matching video.");
+
+        if (body.matchType === "exact" || body.matchType === "normalized") {
+            loadScheduledContent();
+            currentModalItem.external_content_ids[
+                currentModalItem.platform_names.findIndex(p => p?.toLowerCase() === "youtube")
+            ] = body.scheduled.external_content_id;
+            setupYoutubeLinkSection(currentModalItem);
+        } else if (body.matchType === "multiple") {
+            renderYoutubeCandidates(body.candidates);
+        } else {
+            document.getElementById("youtubeNoMatch").style.display = "block";
+        }
+    } catch (err) {
+        errorEl.textContent = err.message;
+        document.getElementById("youtubeFindForm").style.display = "block";
+    } finally {
+        [findBtn, retryBtn, againBtn].forEach(b => { if (b) b.disabled = false; });
+    }
+}
+
+async function selectYoutubeVideo(videoId) {
+    if (!currentModalItem) return;
+    const link = getYoutubeLinkForItem(currentModalItem);
+    const errorEl = document.getElementById("youtubeLinkError");
+    errorEl.textContent = "";
+    if (!link) return;
+
+    try {
+        const res = await fetch(`http://localhost:3000/scheduled-content/${link.scheduleId}/select-youtube-video`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ video_id: videoId }),
+        });
+        const body = await expectJson(res, "Could not link that video.");
+
+        loadScheduledContent();
+        currentModalItem.external_content_ids[
+            currentModalItem.platform_names.findIndex(p => p?.toLowerCase() === "youtube")
+        ] = body.scheduled.external_content_id;
+        setupYoutubeLinkSection(currentModalItem);
+    } catch (err) {
+        errorEl.textContent = err.message;
+    }
+}
+
+document.getElementById("findYoutubeVideoBtn").onclick = runYoutubeVideoSearch;
+document.getElementById("retryYoutubeSearchBtn").onclick = runYoutubeVideoSearch;
+document.getElementById("findYoutubeVideoAgainBtn").onclick = runYoutubeVideoSearch;
+
+document.getElementById("syncYoutubeBtn").onclick = async () => {
+    if (!currentModalItem) return;
+    const link = getYoutubeLinkForItem(currentModalItem);
+    const errorEl = document.getElementById("youtubeLinkError");
+    const syncBtn = document.getElementById("syncYoutubeBtn");
+    errorEl.textContent = "";
+    if (!link) return;
+
+    syncBtn.disabled = true;
+    syncBtn.textContent = "Syncing…";
+    try {
+        const res = await fetch(`http://localhost:3000/performance-metrics/sync/${link.scheduleId}`, {
+            method: "POST",
+        });
+        const body = await expectJson(res, "Could not sync analytics for this video.");
+        renderYoutubeStats(body);
+    } catch (err) {
+        errorEl.textContent = err.message;
+    } finally {
+        syncBtn.disabled = false;
+        syncBtn.textContent = "Sync Analytics";
+    }
+};
+
+document.getElementById("unlinkYoutubeBtn").onclick = async () => {
+    if (!currentModalItem) return;
+    const link = getYoutubeLinkForItem(currentModalItem);
+    const errorEl = document.getElementById("youtubeLinkError");
+    errorEl.textContent = "";
+    if (!link) return;
+
+    if (!confirm("Unlink this YouTube video? Past synced analytics records are kept.")) return;
+
+    try {
+        const res = await fetch(`http://localhost:3000/scheduled-content/${link.scheduleId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ external_content_url: null }),
+        });
+        const body = await expectJson(res, "Could not unlink this video.");
+
+        loadScheduledContent();
+        currentModalItem.external_content_ids[
+            currentModalItem.platform_names.findIndex(p => p?.toLowerCase() === "youtube")
+        ] = null;
+        setupYoutubeLinkSection(currentModalItem);
+    } catch (err) {
+        errorEl.textContent = err.message;
+    }
+};
 
 document.getElementById("closeModal").onclick = () => {
     document.getElementById("eventModal").style.display = "none";
@@ -464,8 +763,14 @@ document.getElementById("saveEditEvent").onclick = async () => {
         });
 
         if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.message || "Failed to update scheduled content");
+            let message = "Failed to update scheduled content";
+            try {
+                const err = await res.json();
+                if (err && err.message) message = err.message;
+            } catch (_) {
+                message = `Failed to update scheduled content (HTTP ${res.status})`;
+            }
+            throw new Error(message);
         }
 
         document.getElementById("eventModal").style.display = "none";
@@ -477,8 +782,18 @@ document.getElementById("saveEditEvent").onclick = async () => {
 };
 
 /* PUBLISH */
+// Marking something Published always succeeds on its own — the YouTube
+// title-matching attempt below is a best-effort follow-up, never a
+// precondition. A creator can mark an item Published before the actual
+// upload exists, or the YouTube API can be briefly unavailable, without
+// losing the Published state.
 document.getElementById("publishEvent").onclick = async () => {
     if (!currentModalItem) return;
+
+    const publishBtn = document.getElementById("publishEvent");
+    publishBtn.disabled = true;
+    publishBtn.textContent = "Publishing…";
+    showPublishStatus("Marking as Published…");
 
     try {
         for (const id of currentModalItem.schedule_ids) {
@@ -487,11 +802,97 @@ document.getElementById("publishEvent").onclick = async () => {
             });
             if (!res.ok) throw new Error("Failed to mark as published");
         }
-        document.getElementById("eventModal").style.display = "none";
+
+        // Reflect the new status locally right away — the youtube-link
+        // section and the Publish/Unpublish buttons both gate on this —
+        // rather than waiting on a full recalendar reload to catch up.
+        currentModalItem.computed_status = "Published";
+        if (currentModalItem.computed_statuses) {
+            currentModalItem.computed_statuses = currentModalItem.computed_statuses.map(() => "Published");
+        }
+        updatePublishButtons(currentModalItem);
         loadScheduledContent();
+
+        const link = getYoutubeLinkForItem(currentModalItem);
+        if (!link || link.externalContentId) {
+            // Not a YouTube item, or a video is already linked — publishing
+            // itself is the whole story here.
+            setupYoutubeLinkSection(currentModalItem);
+            showPublishStatus("Published.", "success");
+            return;
+        }
+
+        setupYoutubeLinkSection(currentModalItem);
+        showPublishStatus("Published. Searching your connected YouTube channel for a matching video…");
+
+        try {
+            const matchRes = await fetch(
+                `http://localhost:3000/scheduled-content/${link.scheduleId}/find-youtube-video`,
+                { method: "POST" }
+            );
+            const matchBody = await expectJson(matchRes, "Could not search YouTube for a matching video.");
+
+            if (matchBody.matchType === "exact" || matchBody.matchType === "normalized") {
+                currentModalItem.external_content_ids[
+                    currentModalItem.platform_names.findIndex(p => p?.toLowerCase() === "youtube")
+                ] = matchBody.scheduled.external_content_id;
+                loadScheduledContent();
+                setupYoutubeLinkSection(currentModalItem);
+                showPublishStatus("Published. YouTube video: Linked.", "success");
+            } else if (matchBody.matchType === "multiple") {
+                setupYoutubeLinkSection(currentModalItem);
+                renderYoutubeCandidates(matchBody.candidates);
+                showPublishStatus("Published. Multiple possible YouTube matches were found — select the correct video below.");
+            } else {
+                showPublishStatus("Published, but no matching YouTube video was found.");
+            }
+        } catch (matchErr) {
+            console.error(matchErr);
+            showPublishStatus(`Published. YouTube video: Not linked (${matchErr.message}).`);
+        }
     } catch (err) {
         console.error(err);
-        alert(err.message);
+        showPublishStatus(err.message || "Failed to mark as published.", "error");
+    } finally {
+        publishBtn.disabled = false;
+        publishBtn.textContent = "Mark Published";
+    }
+};
+
+/* UNPUBLISH */
+// Reverts the scheduling/published state back to Scheduled. This never
+// touches the actual YouTube video — a linked video (external_content_id/
+// external_content_url) is intentionally left in place.
+document.getElementById("unpublishEvent").onclick = async () => {
+    if (!currentModalItem) return;
+
+    const unpublishBtn = document.getElementById("unpublishEvent");
+    unpublishBtn.disabled = true;
+    unpublishBtn.textContent = "Unpublishing…";
+    showPublishStatus("Reverting to Scheduled…");
+
+    try {
+        for (const id of currentModalItem.schedule_ids) {
+            const res = await fetch(`http://localhost:3000/scheduled-content/${id}/unpublish`, {
+                method: "PATCH"
+            });
+            if (!res.ok) throw new Error("Failed to unpublish");
+        }
+
+        currentModalItem.computed_status = "Scheduled";
+        if (currentModalItem.computed_statuses) {
+            currentModalItem.computed_statuses = currentModalItem.computed_statuses.map(() => "Scheduled");
+        }
+        updatePublishButtons(currentModalItem);
+        setupYoutubeLinkSection(currentModalItem);
+        loadScheduledContent();
+        showPublishStatus("Reverted to Scheduled. Any linked YouTube video was kept.", "success");
+    } catch (err) {
+        console.error(err);
+        showPublishStatus(err.message || "Failed to unpublish.", "error");
+    } finally {
+        unpublishBtn.disabled = false;
+        unpublishBtn.textContent = "Unpublish";
     }
 };
 

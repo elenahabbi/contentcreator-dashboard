@@ -6,10 +6,12 @@ function loadScripts() {
     const longFormDiv = document.querySelector(".longForm .preview");
     const shortFormDiv = document.querySelector(".shortForm .preview");
     const carouselDiv = document.querySelector(".carousel .preview");
+    const loadingIndicator = document.querySelector(".loading-indicator");
 
     if (longFormDiv) longFormDiv.innerHTML = "";
     if (shortFormDiv) shortFormDiv.innerHTML = "";
     if (carouselDiv) carouselDiv.innerHTML = "";
+    if (loadingIndicator) loadingIndicator.classList.remove("hidden");
 
     fetch("http://localhost:3000/scripts")
         .then(res => {
@@ -20,31 +22,41 @@ function loadScripts() {
             console.log("Fetched scripts:", scripts);
             scripts.forEach(script => {
 
-                if (currentFilter !== "all") {
-                    if (script.status !== currentFilter.slice(0, -1)) return;
-                }
+                // currentFilter and script.status both use the actual stored
+                // values (draft / filmed / posted) — see write.html's status select.
+                if (currentFilter !== "all" && script.status !== currentFilter) return;
 
-                const p = document.createElement("p");
-                p.textContent = script.title;
-                p.classList.add("script-item");
-                p.style.cursor = "pointer";
+                const row = document.createElement("div");
+                row.classList.add("script-item", "script-item-row");
+                row.addEventListener("click", () => openScript(script));
 
-                p.addEventListener("click", () => openScript(script));
+                const title = document.createElement("span");
+                title.textContent = script.title;
+
+                const badge = document.createElement("span");
+                badge.textContent = script.status || "draft";
+                badge.classList.add("script-status-badge", `script-status-${script.status || "draft"}`);
+
+                row.appendChild(title);
+                row.appendChild(badge);
 
                 // content_type now lives on the joined `content` row
                 // ("folder" was the old scripts.folder column)
                 if (script.content_type?.trim() === "long-form" && longFormDiv) {
-                    longFormDiv.appendChild(p);
+                    longFormDiv.appendChild(row);
                 } else if (script.content_type?.trim() === "short-form" && shortFormDiv) {
-                    shortFormDiv.appendChild(p);
+                    shortFormDiv.appendChild(row);
                 } else if (script.content_type?.trim() === "carousel" && carouselDiv) {
-                    carouselDiv.appendChild(p);
+                    carouselDiv.appendChild(row);
                 } else {
                     console.warn("Unknown content_type:", script.content_type);
                 }
             });
         })
-        .catch(err => console.error("Error loading scripts:", err));
+        .catch(err => console.error("Error loading scripts:", err))
+        .finally(() => {
+            if (loadingIndicator) loadingIndicator.classList.add("hidden");
+        });
 }
 
 // --- ADD SCRIPT ---
@@ -127,16 +139,20 @@ document.addEventListener("DOMContentLoaded", () => {
             preview.style.display = "none";
 
             folder.addEventListener("click", (e) => {
-                if (e.target.classList.contains("script-item")) return;
+                if (e.target.closest(".script-item")) return;
                 preview.style.display =
                     preview.style.display === "none" ? "block" : "none";
             });
         });
 
-    document.querySelectorAll(".ulScripts li").forEach(li => {
-        li.style.cursor = "pointer";
-        li.addEventListener("click", () => {
-            currentFilter = li.dataset.status;
+    // Status filter bar (All / Draft / Filmed / Posted) — filters against
+    // the actual stored script.status values from write.html's status select.
+    document.querySelectorAll("#scriptFilterBar .script-filter-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            currentFilter = btn.dataset.status;
+            document.querySelectorAll("#scriptFilterBar .script-filter-btn")
+                .forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
             loadScripts();
         });
     });

@@ -133,7 +133,7 @@
     <div class="modal-content">
 
         <!-- Top row -->
-        <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div class="modal-header-row">
             <h3 id="modalEventTitle"></h3>
             <span id="modalDate" style="font-size:12px; opacity:0.7;"></span>
         </div>
@@ -150,6 +150,55 @@
         <p style="font-weight:bold;">Script Content:</p>
         <p id="modalScript"></p>
 
+        <hr>
+
+        <!-- YOUTUBE ANALYTICS LINK/SYNC — only shown when this scheduled
+             item includes a YouTube platform row. Views/likes/comments here
+             are always pulled live from the YouTube API, never typed in. -->
+        <div id="youtubeLinkSection" class="youtube-link-section" style="display:none;">
+            <p class="youtube-link-heading">YouTube Video</p>
+
+            <!-- Shown until this scheduled item has actually been published —
+                 there is nothing on YouTube to search for yet. -->
+            <p id="youtubeNotPublishedNote" class="youtube-not-published-note" style="display:none;">
+                Mark this item Published to search your connected YouTube channel for the matching video.
+            </p>
+
+            <!-- Default state once published: no video linked yet. The
+                 creator never types a URL — this triggers an automatic
+                 search of their own connected channel by content title. -->
+            <div id="youtubeFindForm" class="youtube-find-form" style="display:none;">
+                <p class="youtube-find-form-text">No video linked yet.</p>
+                <button type="button" id="findYoutubeVideoBtn">Find YouTube Video</button>
+            </div>
+
+            <!-- Multiple plausible matches: never auto-picked, the creator
+                 chooses the correct upload from their own channel. -->
+            <div id="youtubeCandidates" class="youtube-candidates-box" style="display:none;">
+                <p class="youtube-candidates-heading">Multiple possible matches — select the correct video:</p>
+                <div id="youtubeCandidatesList" class="youtube-candidates-list"></div>
+                <button type="button" id="retryYoutubeSearchBtn" class="youtube-search-again-btn">None of these — search again</button>
+            </div>
+
+            <!-- No match found on the connected channel. Never fabricated —
+                 the creator can simply try again later. -->
+            <div id="youtubeNoMatch" class="youtube-no-match-box" style="display:none;">
+                <p>No matching video was found on your connected YouTube channel.</p>
+                <button type="button" id="findYoutubeVideoAgainBtn" class="youtube-search-again-btn">Search Again</button>
+            </div>
+
+            <div id="youtubeLinkedInfo" class="youtube-linked-info" style="display:none;">
+                <p class="youtube-video-id">Linked video: <span id="youtubeVideoIdText"></span></p>
+                <div id="youtubeStatsDisplay" class="youtube-stats-display"></div>
+                <div class="youtube-linked-actions">
+                    <button type="button" id="syncYoutubeBtn">Sync Analytics</button>
+                    <button type="button" id="unlinkYoutubeBtn">Unlink</button>
+                </div>
+            </div>
+
+            <p id="youtubeLinkError" class="youtube-link-error"></p>
+        </div>
+
         <!-- Edit form, hidden until "Edit" is clicked -->
         <div id="modalEditForm" style="display:none; margin-top:8px;">
             <input id="modalEditDate" type="date">
@@ -165,10 +214,13 @@
             <button id="saveEditEvent">Save Changes</button>
         </div>
 
+        <p id="publishStatusMessage" class="subscriber-sync-message" style="display:none;"></p>
+
         <button id="editEvent">Edit</button>
         <button id="publishEvent">Mark Published</button>
+        <button id="unpublishEvent" style="display:none;">Unpublish</button>
         <button id="deleteEvent">Delete</button>
-        <button id="closeModal">Close</button>
+        <button id="closeModal">x</button>
     </div>
 </div>
 

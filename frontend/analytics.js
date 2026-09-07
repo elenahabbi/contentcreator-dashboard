@@ -6,6 +6,14 @@ let topContentData = [];
 let platformData = [];
 let trendData = [];
 let metricsData = [];
+let followerData = {};
+let subscriberChart = null;
+let consistencyData = {};
+let platformConsistencyData = [];
+let trendConsistencyData = [];
+let consistencyTrendChart = null;
+
+let connectionData = {};
 
 let contentOptions = [];   // from GET /content   -> {content_id, title}
 let platformOptions = [];  // from GET /platforms -> {platform_id, platform_name}
@@ -23,6 +31,32 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const addBtn = document.getElementById("addMetricBtn");
     if (addBtn) addBtn.addEventListener("click", () => openMetricModal());
+
+    const syncSubscribersBtn = document.getElementById("syncSubscribersBtn");
+    if (syncSubscribersBtn) {
+        syncSubscribersBtn.addEventListener("click", syncYouTubeSubscribers);
+    }
+
+        const connectChannelBtn = document.getElementById("connectChannelBtn");
+    if (connectChannelBtn) connectChannelBtn.addEventListener("click", connectYouTubeChannel);
+
+    const switchChannelBtn = document.getElementById("switchChannelBtn");
+    if (switchChannelBtn) switchChannelBtn.addEventListener("click", showSwitchChannelForm);
+
+    const disconnectChannelBtn = document.getElementById("disconnectChannelBtn");
+    if (disconnectChannelBtn) disconnectChannelBtn.addEventListener("click", disconnectYouTubeChannel);
+
+    const connectYoutubeAccountBtn = document.getElementById("connectYoutubeAccountBtn");
+    if (connectYoutubeAccountBtn) {
+        connectYoutubeAccountBtn.addEventListener("click", () => {
+            // Full-page navigation (not fetch) — the OAuth round-trip with
+            // Google has to happen as real page loads, not an XHR/fetch call.
+            window.location.href = `${API_BASE}/auth/youtube`;
+        });
+    }
+
+    handleYoutubeConnectionRedirect();
+    loadYoutubeConnectionStatus();
 
     const closeBtn = document.getElementById("closeMetricModal");
     if (closeBtn) closeBtn.addEventListener("click", closeMetricModal);
@@ -53,12 +87,20 @@ async function loadAnalytics() {
     clearPageError();
 
     try {
-        const [summaryRes, topRes, platformRes, trendRes, metricsRes] = await Promise.all([
+        const [
+            summaryRes, topRes, platformRes, trendRes, metricsRes, followerRes,
+            consistencyRes, consistencyPlatformRes, consistencyTrendRes, connectionRes,
+        ] = await Promise.all([
             fetch(`${API_BASE}/analytics/summary`),
             fetch(`${API_BASE}/analytics/top-content`),
             fetch(`${API_BASE}/analytics/platform-performance`),
             fetch(`${API_BASE}/analytics/performance-over-time`),
             fetch(`${API_BASE}/performance-metrics`),
+            fetch(`${API_BASE}/api/analytics/followers`),
+            fetch(`${API_BASE}/analytics/consistency`),
+            fetch(`${API_BASE}/analytics/consistency/by-platform`),
+            fetch(`${API_BASE}/analytics/consistency/trend`),
+            fetch(`${API_BASE}/api/youtube/connection`),
         ]);
 
         summaryData = await expectOk(summaryRes, "Could not load the analytics summary.");
@@ -66,17 +108,171 @@ async function loadAnalytics() {
         platformData = await expectOk(platformRes, "Could not load platform performance.");
         trendData = await expectOk(trendRes, "Could not load the performance trend.");
         metricsData = await expectOk(metricsRes, "Could not load performance records.");
+        followerData = await expectOk(followerRes, "Could not load YouTube subscriber analytics.");
+        consistencyData = await expectOk(consistencyRes, "Could not load posting consistency.");
+        platformConsistencyData = await expectOk(consistencyPlatformRes, "Could not load platform consistency.");
+        trendConsistencyData = await expectOk(consistencyTrendRes, "Could not load the consistency trend.");
+        // GET /api/youtube/connection intentionally isn't run through
+        // expectOk() — it always returns 200 with a connected:false body
+        // instead of an HTTP error status (see server.js), so treating a
+        // non-OK response here as fatal would only apply to a genuine
+        // network/server failure, not "no channel connected yet".
+        connectionData = connectionRes.ok ? await connectionRes.json() : {};
 
-        renderSummary();
-        renderTrendChart();
-        renderPlatformTable();
-        renderTopContent();
-        renderMetricsTable();
+        // ROOT CAUSE (PARTS 6 & 7 — "Performance Over Time" stayed blank
+        // and "Top Performing Content" stayed stuck on "Loading top
+        // content…"): these render*() calls used to run one after another
+        // with no isolation. If any single one threw partway through
+        // (e.g. a Chart.js instantiation failing because the CDN script
+        // didn't load, or any other unexpected runtime error), every
+        // render*() call still queued after it in this list — including
+        // totally unrelated widgets like the trend chart and top-content
+        // list — silently never ran at all, leaving their initial
+        // "Loading…"/blank markup on screen forever, while widgets earlier
+        // in the list (KPI cards, connection status) already looked fine.
+        // That's an internal rendering failure, not a failed fetch — the
+        // page-level error banner (catch block below) never fires for it
+        // either, since the exception is caught right here per-widget
+        // instead of bubbling past this point. Each widget now renders
+        // (or fails) independently, exactly like a real loading/empty/
+        // error state should.
+        runRenderStep("KPI summary", renderSummary);
+        runRenderStep("posting consistency", renderConsistency);
+        runRenderStep("YouTube connection status", renderConnectionStatus);
+        runRenderStep("subscriber analytics", renderSubscriberAnalytics);
+        runRenderStep("consistency by platform", renderConsistencyPlatformTable);
+        runRenderStep("consistency trend chart", renderConsistencyTrendChart);
+        runRenderStep("performance over time chart", renderTrendChart);
+        runRenderStep("platform performance table", renderPlatformTable);
+        runRenderStep("top performing content", renderTopContent);
+        runRenderStep("performance metrics table", renderMetricsTable);
     } catch (error) {
         console.error("Analytics load error:", error);
         showPageError(error.message || "Unable to load analytics data. Please try again.");
     } finally {
         setAnalyticsLoading(false);
+    }
+}
+
+// Runs one widget's render function in isolation: a bug or unexpected
+// runtime error in one widget is logged and otherwise contained, instead
+// of aborting every widget queued after it in loadAnalytics() above.
+function runRenderStep(label, fn) {
+    try {
+        fn();
+    } catch (error) {
+        console.error(`Analytics widget "${label}" failed to render:`, error);
+    }
+}
+
+// ============================================
+// YOUTUBE CHANNEL CONNECTION
+// (GET/POST/DELETE /api/youtube/channel, /api/youtube/connection)
+// ============================================
+
+// Shows which YouTube channel the backend currently considers connected
+// (from GET /api/youtube/connection), and toggles between the connect
+// form (nothing connected, or connecting a new one) and the linked-info
+// view (a confirmed channel is active) — mirrors the video-connect
+// pattern already used on the Content Planner page.
+function renderConnectionStatus() {
+    const connectForm = document.getElementById("youtubeChannelConnectForm");
+    const linkedInfo = document.getElementById("youtubeChannelLinkedInfo");
+    const errorEl = document.getElementById("youtubeChannelError");
+    if (!connectForm || !linkedInfo) return;
+
+    if (connectionData.connected) {
+        connectForm.style.display = "none";
+        linkedInfo.style.display = "block";
+        setText("youtubeChannelNameText", connectionData.channelName || "Unknown name");
+        setText("youtubeChannelIdText", connectionData.channelId);
+        if (errorEl) errorEl.textContent = "";
+    } else {
+        connectForm.style.display = "flex";
+        linkedInfo.style.display = "none";
+        if (errorEl) {
+            errorEl.textContent = connectionData.channelId
+                ? `Channel ${connectionData.channelId} is configured but could not be confirmed${connectionData.error ? `: ${connectionData.error}` : "."}`
+                : "";
+        }
+    }
+}
+
+async function connectYouTubeChannel() {
+    const input = document.getElementById("youtubeChannelIdInput");
+    const button = document.getElementById("connectChannelBtn");
+    const errorEl = document.getElementById("youtubeChannelError");
+    if (!input) return;
+
+    const channelId = input.value.trim();
+    if (errorEl) errorEl.textContent = "";
+
+    if (!channelId) {
+        if (errorEl) errorEl.textContent = "Paste a YouTube channel ID first.";
+        return;
+    }
+
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Connecting…";
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/api/youtube/channel`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ channel_id: channelId }),
+        });
+
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(body.message || "Could not connect that channel.");
+        }
+
+        input.value = "";
+        await loadAnalytics();
+    } catch (error) {
+        console.error("YouTube channel connect error:", error);
+        if (errorEl) errorEl.textContent = error.message || "Could not connect that channel. Please try again.";
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = "Connect";
+        }
+    }
+}
+
+// Reveals the connect form again over the linked-info view, pre-filled
+// with nothing, so the person can paste a different channel's ID. The
+// currently connected channel stays connected until they submit a new one.
+function showSwitchChannelForm() {
+    const connectForm = document.getElementById("youtubeChannelConnectForm");
+    const linkedInfo = document.getElementById("youtubeChannelLinkedInfo");
+    const errorEl = document.getElementById("youtubeChannelError");
+    if (connectForm) connectForm.style.display = "flex";
+    if (linkedInfo) linkedInfo.style.display = "none";
+    if (errorEl) errorEl.textContent = "";
+}
+
+async function disconnectYouTubeChannel() {
+    if (!confirm("Disconnect this YouTube channel? Historical analytics will be kept.")) return;
+
+    const button = document.getElementById("disconnectChannelBtn");
+    const errorEl = document.getElementById("youtubeChannelError");
+    if (button) button.disabled = true;
+
+    try {
+        const response = await fetch(`${API_BASE}/api/youtube/channel`, { method: "DELETE" });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(body.message || "Could not disconnect the channel.");
+        }
+        await loadAnalytics();
+    } catch (error) {
+        console.error("YouTube channel disconnect error:", error);
+        if (errorEl) errorEl.textContent = error.message || "Could not disconnect the channel. Please try again.";
+    } finally {
+        if (button) button.disabled = false;
     }
 }
 
@@ -150,6 +346,383 @@ function setMetricValue(elementId, rawValue) {
 }
 
 // ============================================
+// POSTING CONSISTENCY  (GET /analytics/consistency,
+// /analytics/consistency/by-platform, /analytics/consistency/trend)
+// ============================================
+
+function renderConsistency() {
+    const summary = document.getElementById("consistencySummary");
+    const note = document.getElementById("consistencyNote");
+    const empty = document.getElementById("consistencyEmpty");
+
+    const eligible = consistencyData.eligibleContent || 0;
+    const pct = consistencyData.consistencyPercentage;
+
+    // 0% is a real (bad) result, but "no data yet" must never look like 0% —
+    // that would misrepresent a creator who simply hasn't hit a deadline yet.
+    if (!eligible) {
+        if (summary) summary.style.display = "none";
+        if (note) note.style.display = "none";
+        if (empty) empty.style.display = "block";
+        return;
+    }
+
+    if (summary) summary.style.display = "flex";
+    if (note) note.style.display = "block";
+    if (empty) empty.style.display = "none";
+
+    const percentEl = document.getElementById("consistencyPercentage");
+    if (percentEl) {
+        percentEl.textContent = pct === null || pct === undefined ? "N/A" : `${pct}%`;
+    }
+    setText("consistencyPublished", formatNumber(consistencyData.publishedCount));
+    setText("consistencyMissed", formatNumber(consistencyData.missedCount));
+}
+
+function renderConsistencyPlatformTable() {
+    const tbody = document.getElementById("consistencyPlatformTableBody");
+    const emptyState = document.getElementById("consistencyPlatformEmpty");
+    if (!tbody) return;
+
+    if (!Array.isArray(platformConsistencyData) || platformConsistencyData.length === 0) {
+        tbody.innerHTML = "";
+        if (emptyState) emptyState.style.display = "block";
+        return;
+    }
+
+    if (emptyState) emptyState.style.display = "none";
+
+    tbody.innerHTML = platformConsistencyData.map(row => `
+        <tr>
+            <td><span class="platform-pill">${escapeHTML(row.platform || "Unknown")}</span></td>
+            <td>${formatNumber(row.publishedCount)}</td>
+            <td>${formatNumber(row.missedCount)}</td>
+            <td>${row.consistencyPercentage === null ? "N/A" : formatPercent(row.consistencyPercentage)}</td>
+        </tr>
+    `).join("");
+}
+
+function renderConsistencyTrendChart() {
+    const canvas = document.getElementById("consistencyTrendChart");
+    const emptyState = document.getElementById("consistencyTrendEmpty");
+    if (!canvas) return;
+
+    if (!Array.isArray(trendConsistencyData) || trendConsistencyData.length === 0) {
+        canvas.style.display = "none";
+        if (emptyState) emptyState.style.display = "block";
+        if (consistencyTrendChart) {
+            consistencyTrendChart.destroy();
+            consistencyTrendChart = null;
+        }
+        return;
+    }
+
+    // See the matching guard in renderTrendChart() (PART 6) for why this
+    // check exists.
+    if (typeof Chart === "undefined") {
+        canvas.style.display = "none";
+        if (emptyState) {
+            emptyState.textContent = "Could not load the chart library. Try refreshing the page.";
+            emptyState.style.display = "block";
+        }
+        return;
+    }
+
+    canvas.style.display = "block";
+    if (emptyState) emptyState.style.display = "none";
+
+    const labels = trendConsistencyData.map(row => row.period);
+    const values = trendConsistencyData.map(row => row.consistencyPercentage === null ? 0 : row.consistencyPercentage);
+
+    if (consistencyTrendChart) {
+        consistencyTrendChart.data.labels = labels;
+        consistencyTrendChart.data.datasets[0].data = values;
+        consistencyTrendChart.update();
+        return;
+    }
+
+    consistencyTrendChart = new Chart(canvas.getContext("2d"), {
+        type: "bar",
+        data: {
+            labels,
+            datasets: [{
+                label: "Consistency %",
+                data: values,
+                backgroundColor: "#8D93CB",
+                borderRadius: 4,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => `${ctx.parsed.y}% consistency`,
+                    },
+                },
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: "#7a6f6f" },
+                },
+                y: {
+                    beginAtZero: true,
+                    max: 100,
+                    grid: { color: "#f0e1d4" },
+                    ticks: {
+                        color: "#7a6f6f",
+                        callback: (value) => `${value}%`,
+                    },
+                },
+            },
+        },
+    });
+}
+
+// ============================================
+// YOUTUBE SUBSCRIBER ANALYTICS
+// (GET /api/analytics/followers)
+// ============================================
+
+function renderSubscriberAnalytics() {
+    const current = followerData.currentSubscribers;
+    const growth = followerData.subscriberGrowth;
+    const rate = followerData.growthRate;
+    const history = Array.isArray(followerData.history) ? followerData.history : [];
+
+    setText(
+        "subscriberCurrent",
+        current === null || current === undefined ? "—" : formatNumber(current)
+    );
+    // "Since last sync" — the change between the two most recent snapshots
+    // only. Two identical back-to-back syncs correctly show 0 here; that
+    // is not history being lost, see subscriberAllTimeGrowth below for the
+    // full trend across every retained snapshot.
+    setText(
+        "subscriberGrowth",
+        growth === null || growth === undefined ? "N/A" : formatSignedNumber(growth)
+    );
+    setText(
+        "subscriberGrowthRate",
+        rate === null || rate === undefined ? "N/A" : `${Number(rate).toFixed(2)}%`
+    );
+
+    // "All-time" — change from the very first retained snapshot to the
+    // latest one, computed from the same history array the chart uses.
+    // Nothing new is fetched or stored for this; it only reframes data the
+    // backend already sent, per the existing follower_metrics history.
+    const allTimeEl = document.getElementById("subscriberAllTimeGrowth");
+    if (allTimeEl) {
+        if (history.length >= 2) {
+            const first = Number(history[0].follower_count) || 0;
+            const last = Number(history[history.length - 1].follower_count) || 0;
+            allTimeEl.textContent = formatSignedNumber(last - first);
+        } else {
+            allTimeEl.textContent = "N/A";
+        }
+    }
+
+    renderSubscriberChart();
+}
+
+// ============================================
+// YOUTUBE ACCOUNT CONNECTION (Google OAuth)
+// ============================================
+
+// Reads the ?youtube=connected|error|config_missing query param that
+// /auth/youtube/callback redirects back with, shows a one-time status
+// message, then strips the param so a page refresh doesn't repeat it.
+function handleYoutubeConnectionRedirect() {
+    const params = new URLSearchParams(window.location.search);
+    const youtubeParam = params.get("youtube");
+    if (!youtubeParam) return;
+
+    const message = document.getElementById("youtubeConnectionMessage");
+    if (message) {
+        if (youtubeParam === "connected") {
+            message.textContent = "YouTube account connected successfully.";
+            message.className = "subscriber-sync-message success";
+        } else if (youtubeParam === "config_missing") {
+            message.textContent = "YouTube connection isn't configured on the server yet.";
+            message.className = "subscriber-sync-message error";
+        } else {
+            message.textContent = "Could not connect your YouTube account. Please try again.";
+            message.className = "subscriber-sync-message error";
+        }
+    }
+
+    params.delete("youtube");
+    const newSearch = params.toString();
+    const newUrl =
+        window.location.pathname + (newSearch ? `?${newSearch}` : "") + window.location.hash;
+    window.history.replaceState({}, "", newUrl);
+}
+
+// Asks the backend whether YouTube is connected and shows the right UI
+// state — "Connect YouTube" button, or a connected indicator. Never
+// receives or handles an OAuth token; only a boolean + channel ID.
+async function loadYoutubeConnectionStatus() {
+    const badge = document.getElementById("youtubeConnectionBadge");
+    const connectBtn = document.getElementById("connectYoutubeAccountBtn");
+    if (!badge) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/youtube/connection-status`);
+        if (!response.ok) throw new Error("Could not check YouTube connection status.");
+        const data = await response.json();
+
+        if (data.connected) {
+            badge.textContent = "YouTube Connected";
+            badge.className = "youtube-connection-badge youtube-connection-badge--connected";
+            if (connectBtn) connectBtn.classList.add("is-hidden");
+        } else {
+            badge.textContent = "YouTube Not Connected";
+            badge.className = "youtube-connection-badge youtube-connection-badge--not-connected";
+            if (connectBtn) connectBtn.classList.remove("is-hidden");
+        }
+    } catch (error) {
+        console.error("YouTube connection status error:", error);
+        badge.textContent = "Could not check YouTube connection";
+        badge.className = "youtube-connection-badge youtube-connection-badge--not-connected";
+        if (connectBtn) connectBtn.classList.remove("is-hidden");
+    }
+}
+
+async function syncYouTubeSubscribers() {
+    const button = document.getElementById("syncSubscribersBtn");
+    const message = document.getElementById("subscriberSyncMessage");
+
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Syncing…";
+    }
+    if (message) {
+        message.textContent = "Fetching the latest public subscriber count from YouTube…";
+        message.className = "subscriber-sync-message";
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/api/analytics/youtube/subscribers/sync`, {
+            method: "POST",
+        });
+
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(body.message || "Could not sync YouTube subscribers.");
+        }
+
+        if (message) {
+            message.textContent = body.duplicate
+                ? "Already synced within the last 60 seconds. No duplicate snapshot was created."
+                : `YouTube subscribers synced: ${formatNumber(body.follower_count)}.`;
+            message.className = "subscriber-sync-message success";
+        }
+
+        await loadAnalytics();
+    } catch (error) {
+        console.error("YouTube subscriber sync error:", error);
+        if (message) {
+            message.textContent = error.message || "Could not sync YouTube subscribers. Please try again.";
+            message.className = "subscriber-sync-message error";
+        }
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = "Sync YouTube Subscribers";
+        }
+    }
+}
+
+function renderSubscriberChart() {
+    const canvas = document.getElementById("subscriberChart");
+    const emptyState = document.getElementById("subscriberEmpty");
+    const history = Array.isArray(followerData.history) ? followerData.history : [];
+
+    if (!canvas) return;
+
+    if (history.length < 2) {
+        canvas.style.display = "none";
+        if (emptyState) emptyState.style.display = "block";
+        if (subscriberChart) {
+            subscriberChart.destroy();
+            subscriberChart = null;
+        }
+        return;
+    }
+
+    // See the matching guard in renderTrendChart() (PART 6) for why this
+    // check exists.
+    if (typeof Chart === "undefined") {
+        canvas.style.display = "none";
+        if (emptyState) {
+            emptyState.textContent = "Could not load the chart library. Try refreshing the page.";
+            emptyState.style.display = "block";
+        }
+        return;
+    }
+
+    canvas.style.display = "block";
+    if (emptyState) emptyState.style.display = "none";
+
+    const labels = history.map(row => formatDateTime(row.recorded_at));
+    const subscribers = history.map(row => Number(row.follower_count) || 0);
+
+    if (subscriberChart) {
+        subscriberChart.data.labels = labels;
+        subscriberChart.data.datasets[0].data = subscribers;
+        subscriberChart.update();
+        return;
+    }
+
+    subscriberChart = new Chart(canvas.getContext("2d"), {
+        type: "line",
+        data: {
+            labels,
+            datasets: [{
+                label: "Subscribers",
+                data: subscribers,
+                borderColor: "#8D93CB",
+                backgroundColor: "rgba(141, 147, 203, 0.15)",
+                borderWidth: 2,
+                tension: 0.25,
+                pointRadius: 3,
+                pointBackgroundColor: "#8D93CB",
+                fill: true,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => `${formatNumber(ctx.parsed.y)} subscribers`,
+                    },
+                },
+            },
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: "#7a6f6f" },
+                },
+                y: {
+                    beginAtZero: false,
+                    grid: { color: "#f0e1d4" },
+                    ticks: {
+                        color: "#7a6f6f",
+                        callback: (value) => formatCompactNumber(value),
+                    },
+                },
+            },
+        },
+    });
+}
+
+// ============================================
 // PERFORMANCE OVER TIME CHART  (GET /analytics/performance-over-time)
 // ============================================
 
@@ -164,6 +737,22 @@ function renderTrendChart() {
         if (trendChart) {
             trendChart.destroy();
             trendChart = null;
+        }
+        return;
+    }
+
+    // Defence in depth for PART 6: if the Chart.js CDN script (loaded in
+    // analytics.html) ever fails to load, don't leave the canvas visible
+    // but un-drawn (an "unexplained blank div" in every practical sense) —
+    // fall back to a clear, worded empty state instead. loadAnalytics()'s
+    // per-widget isolation (see runRenderStep) already stops this from
+    // taking down other widgets, but the div should never look blank on
+    // its own either.
+    if (typeof Chart === "undefined") {
+        canvas.style.display = "none";
+        if (emptyState) {
+            emptyState.textContent = "Could not load the chart library. Try refreshing the page.";
+            emptyState.style.display = "block";
         }
         return;
     }
@@ -548,6 +1137,13 @@ function formatCompactNumber(value) {
 // numbers (e.g. 12.95 means 12.95%) — never multiply or append twice.
 function formatPercent(value) {
     return `${Number(value || 0).toFixed(2)}%`;
+}
+
+function formatSignedNumber(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return "N/A";
+    if (num > 0) return `+${formatNumber(num)}`;
+    return formatNumber(num);
 }
 
 function formatDateLabel(dateValue) {
