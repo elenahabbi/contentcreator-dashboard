@@ -216,6 +216,74 @@ app.get(
 );
 
 // =======================================================================
+// CATEGORIES
+// Read-only reference data (seeded once, see database/SCHEMA2.sql) plus
+// the content_categories join table. Both existed in the schema from the
+// start but had zero routes touching them until now. Wiring this up
+// gives content planning (Objective 1) real categorisation, and gives
+// later phases (competitor topics, opportunity relevance) something
+// concrete to compare a creator's own content scope against, instead of
+// inventing a second ad hoc "topic" concept.
+// =======================================================================
+
+app.get(
+  "/categories",
+  asyncHandler(async (req, res) => {
+    const [rows] = await db.query(
+      "SELECT category_id, category_name, description FROM categories ORDER BY category_name"
+    );
+    res.json(rows);
+  })
+);
+
+// Attaches `categories: [{category_id, category_name}]` to each row in
+// `items`, matched on `idField` (e.g. "content_id"), using one batched
+// query instead of N+1 per-row queries. Rows with no assigned categories
+// get `categories: []`, not an omitted field, so the frontend never has
+// to null-check it.
+async function attachCategories(items, idField) {
+  if (items.length === 0) return items;
+  const ids = items.map((item) => item[idField]);
+  const [rows] = await db.query(
+    `SELECT cc.content_id, c.category_id, c.category_name
+     FROM content_categories cc
+     JOIN categories c ON c.category_id = cc.category_id
+     WHERE cc.content_id IN (?)`,
+    [ids]
+  );
+  const byContentId = new Map();
+  for (const row of rows) {
+    if (!byContentId.has(row.content_id)) byContentId.set(row.content_id, []);
+    byContentId.get(row.content_id).push({
+      category_id: row.category_id,
+      category_name: row.category_name,
+    });
+  }
+  items.forEach((item) => {
+    item.categories = byContentId.get(item[idField]) || [];
+  });
+  return items;
+}
+
+// Replaces every category assignment for one content item with
+// `categoryIds` (an array of category_id). Pass an empty array to clear
+// all categories for that content item. If categoryIds is undefined
+// (the caller's request body didn't mention categories at all), this is
+// a no-op — existing assignments are left untouched, so a plain
+// title/status update never accidentally wipes categorisation.
+async function setContentCategories(contentId, categoryIds) {
+  if (categoryIds === undefined) return;
+  await db.query("DELETE FROM content_categories WHERE content_id = ?", [contentId]);
+  const ids = Array.isArray(categoryIds) ? categoryIds.filter((id) => id) : [];
+  if (ids.length === 0) return;
+  const values = ids.map((categoryId) => [contentId, categoryId]);
+  await db.query(
+    "INSERT INTO content_categories (content_id, category_id) VALUES ?",
+    [values]
+  );
+}
+
+// =======================================================================
 // CONTENT
 // =======================================================================
 
@@ -230,6 +298,7 @@ app.get(
     }
     sql += " ORDER BY created_at DESC";
     const [rows] = await db.query(sql, params);
+    await attachCategories(rows, "content_id");
     res.json(rows);
   })
 );
@@ -243,6 +312,7 @@ app.get(
     if (rows.length === 0) {
       return res.status(404).json({ message: "Content not found" });
     }
+    await attachCategories(rows, "content_id");
     res.json(rows[0]);
   })
 );
@@ -250,7 +320,7 @@ app.get(
 app.post(
   "/content",
   asyncHandler(async (req, res) => {
-    const { title, description, content_type, status } = req.body || {};
+    const { title, description, content_type, status, category_ids } = req.body || {};
 
     if (!title || !content_type) {
       return res
@@ -264,9 +334,12 @@ app.post(
       [DEFAULT_USER_ID, title, description || null, content_type, status || "draft"]
     );
 
+    await setContentCategories(result.insertId, category_ids);
+
     const [rows] = await db.query("SELECT * FROM content WHERE content_id = ?", [
       result.insertId,
     ]);
+    await attachCategories(rows, "content_id");
     res.status(201).json(rows[0]);
   })
 );
@@ -274,7 +347,7 @@ app.post(
 app.put(
   "/content/:id",
   asyncHandler(async (req, res) => {
-    const { title, description, content_type, status } = req.body || {};
+    const { title, description, content_type, status, category_ids } = req.body || {};
     const { id } = req.params;
 
     const [existing] = await db.query(
@@ -296,9 +369,12 @@ app.put(
       [title, description, content_type, status, id]
     );
 
+    await setContentCategories(id, category_ids);
+
     const [rows] = await db.query("SELECT * FROM content WHERE content_id = ?", [
       id,
     ]);
+    await attachCategories(rows, "content_id");
     res.json(rows[0]);
   })
 );
@@ -353,6 +429,7 @@ app.get(
     }
     sql += " ORDER BY s.created_at DESC";
     const [rows] = await db.query(sql, params);
+    await attachCategories(rows, "content_id");
     res.json(rows);
   })
 );
@@ -366,6 +443,7 @@ app.get(
     if (rows.length === 0) {
       return res.status(404).json({ message: "Script not found" });
     }
+    await attachCategories(rows, "content_id");
     res.json(rows[0]);
   })
 );
@@ -385,6 +463,7 @@ app.post(
       status,
       content_id,
       content_type, // used only when auto-creating content ("folder" in the old UI)
+      category_ids,
     } = req.body || {};
 
     if (!title || !script_content) {
@@ -415,6 +494,8 @@ app.post(
       finalContentId = contentResult.insertId;
     }
 
+    await setContentCategories(finalContentId, category_ids);
+
     const [scriptResult] = await db.query(
       `INSERT INTO scripts (content_id, title, script_content, notes, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
@@ -424,6 +505,7 @@ app.post(
     const [rows] = await db.query(`${SCRIPT_SELECT} WHERE s.script_id = ?`, [
       scriptResult.insertId,
     ]);
+    await attachCategories(rows, "content_id");
     res.status(201).json(rows[0]);
   })
 );
@@ -432,7 +514,7 @@ app.put(
   "/scripts/:id",
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { title, script_content, notes, status, content_type } = req.body || {};
+    const { title, script_content, notes, status, content_type, category_ids } = req.body || {};
 
     const [existing] = await db.query(
       "SELECT * FROM scripts WHERE script_id = ?",
@@ -462,7 +544,10 @@ app.put(
       );
     }
 
+    await setContentCategories(existing[0].content_id, category_ids);
+
     const [rows] = await db.query(`${SCRIPT_SELECT} WHERE s.script_id = ?`, [id]);
+    await attachCategories(rows, "content_id");
     res.json(rows[0]);
   })
 );

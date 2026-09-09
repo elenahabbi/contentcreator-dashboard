@@ -401,10 +401,12 @@ CREATE TABLE `scheduled_content` (
   `published_at` datetime DEFAULT NULL,
   `status` varchar(50) NOT NULL DEFAULT 'Scheduled',
   `external_content_id` varchar(255) DEFAULT NULL,
-  `external_content_url` varchar(500) DEFAULT NULL,
+    `external_content_url` varchar(500) DEFAULT NULL,
+  `youtube_channel_id` varchar(24) DEFAULT NULL,
   PRIMARY KEY (`schedule_id`),
   KEY `content_id` (`content_id`),
   KEY `platform_id` (`platform_id`),
+  KEY `idx_scheduled_content_youtube_channel_id` (`youtube_channel_id`),
   CONSTRAINT `scheduled_content_ibfk_1` FOREIGN KEY (`content_id`) REFERENCES `content` (`content_id`) ON DELETE CASCADE,
   CONSTRAINT `scheduled_content_ibfk_2` FOREIGN KEY (`platform_id`) REFERENCES `platforms` (`platform_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=16 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

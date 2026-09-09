@@ -59,6 +59,46 @@ function loadScripts() {
         });
 }
 
+// --- CATEGORIES ---
+// Loads the fixed category list (GET /categories) and renders one
+// checkbox per category into #categoryChecklist. Only present on
+// write.html; a no-op elsewhere.
+function loadCategoryOptions(selectedIds = []) {
+    const container = document.getElementById("categoryChecklist");
+    if (!container) return Promise.resolve();
+
+    return fetch("http://localhost:3000/categories")
+        .then(res => {
+            if (!res.ok) throw new Error("Failed to fetch categories");
+            return res.json();
+        })
+        .then(categories => {
+            container.innerHTML = "";
+            categories.forEach(cat => {
+                const label = document.createElement("label");
+                label.classList.add("category-chip");
+
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.value = cat.category_id;
+                checkbox.checked = selectedIds.includes(cat.category_id);
+
+                label.appendChild(checkbox);
+                label.append(" " + cat.category_name);
+                container.appendChild(label);
+            });
+        })
+        .catch(err => console.error("Error loading categories:", err));
+}
+
+// Reads the checked category_id values from #categoryChecklist as numbers.
+function getSelectedCategoryIds() {
+    const container = document.getElementById("categoryChecklist");
+    if (!container) return undefined; // categories weren't touched on this page
+    return Array.from(container.querySelectorAll("input[type=checkbox]:checked"))
+        .map(el => Number(el.value));
+}
+
 // --- ADD SCRIPT ---
 window.addScript = function () {
     const titleEl = document.getElementById("title");
@@ -70,6 +110,7 @@ window.addScript = function () {
     const title = titleEl.value.trim();
     const script_content = contentEl.value.trim();
     const content_type = folderEl.value; // "short-form" | "long-form" | "carousel"
+    const category_ids = getSelectedCategoryIds();
 
     if (!title || !script_content) {
         alert("Please fill in both title and content");
@@ -89,7 +130,7 @@ window.addScript = function () {
     fetch(endpoint, {
         method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, script_content, content_type, status })
+        body: JSON.stringify({ title, script_content, content_type, status, category_ids })
     })
         .then(res => {
             if (!res.ok) return res.json().then(e => { throw new Error(e.message || "Failed to save script"); });
@@ -191,11 +232,17 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (statusEl) statusEl.value = script.status || "draft";
                 const saveBtn = document.getElementById("saveScript");
                 if (saveBtn) saveBtn.textContent = "Update Script";
+
+                const selectedIds = (script.categories || []).map(c => c.category_id);
+                loadCategoryOptions(selectedIds);
             })
             .catch(err => console.error("Error loading script for edit:", err));
     } else if (document.querySelector(".longForm .preview")) {
         // Only scripts.html has these folder containers.
         loadScripts();
+    } else {
+        // write.html in "create new" mode — no script to prefill from.
+        loadCategoryOptions();
     }
 });
 
