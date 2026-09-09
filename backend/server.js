@@ -2138,6 +2138,339 @@ app.get(
 );
 
 // =======================================================================
+// COMPETITORS
+// Manually-recorded public activity only. There is no live API that
+// exposes another creator's private analytics (and scraping competitor
+// pages is out of scope), so every number here is what the creator has
+// entered by hand from what is publicly visible on a competitor's post.
+// Nothing here is fabricated or estimated — see /analytics/competitor-
+// activity's `dataSource` field, which states this explicitly for the UI.
+// =======================================================================
+
+const COMPETITOR_SELECT = `
+  SELECT co.competitor_id, co.user_id, co.name, co.platform_id,
+         p.platform_name, co.profile_url, co.category, co.created_at
+  FROM competitors co
+  JOIN platforms p ON p.platform_id = co.platform_id
+`;
+
+app.get(
+  "/competitors",
+  asyncHandler(async (req, res) => {
+    const params = [DEFAULT_USER_ID];
+    let sql = `${COMPETITOR_SELECT} WHERE co.user_id = ?`;
+    if (req.query.platform_id) {
+      sql += " AND co.platform_id = ?";
+      params.push(req.query.platform_id);
+    }
+    sql += " ORDER BY co.name";
+    const [rows] = await db.query(sql, params);
+    res.json(rows);
+  })
+);
+
+app.get(
+  "/competitors/:id",
+  asyncHandler(async (req, res) => {
+    const [rows] = await db.query(
+      `${COMPETITOR_SELECT} WHERE co.competitor_id = ?`,
+      [req.params.id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Competitor not found" });
+    }
+    res.json(rows[0]);
+  })
+);
+
+app.post(
+  "/competitors",
+  asyncHandler(async (req, res) => {
+    const { name, platform_id, profile_url, category } = req.body || {};
+    if (!name || !platform_id) {
+      return res.status(400).json({ message: "name and platform_id are required" });
+    }
+    try {
+      const [result] = await db.query(
+        `INSERT INTO competitors (user_id, name, platform_id, profile_url, category, created_at)
+         VALUES (?, ?, ?, ?, ?, NOW())`,
+        [DEFAULT_USER_ID, name, platform_id, profile_url || null, category || null]
+      );
+      const [rows] = await db.query(
+        `${COMPETITOR_SELECT} WHERE co.competitor_id = ?`,
+        [result.insertId]
+      );
+      res.status(201).json(rows[0]);
+    } catch (err) {
+      if (err.code === "ER_NO_REFERENCED_ROW_2" || err.code === "ER_NO_REFERENCED_ROW") {
+        return res.status(400).json({ message: "platform_id does not reference an existing platform" });
+      }
+      throw err;
+    }
+  })
+);
+
+app.put(
+  "/competitors/:id",
+  asyncHandler(async (req, res) => {
+    const { name, platform_id, profile_url, category } = req.body || {};
+    const { id } = req.params;
+
+    const [existing] = await db.query(
+      "SELECT * FROM competitors WHERE competitor_id = ?",
+      [id]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: "Competitor not found" });
+    }
+
+    try {
+      await db.query(
+        `UPDATE competitors SET
+           name = COALESCE(?, name),
+           platform_id = COALESCE(?, platform_id),
+           profile_url = COALESCE(?, profile_url),
+           category = COALESCE(?, category)
+         WHERE competitor_id = ?`,
+        [name, platform_id, profile_url, category, id]
+      );
+    } catch (err) {
+      if (err.code === "ER_NO_REFERENCED_ROW_2" || err.code === "ER_NO_REFERENCED_ROW") {
+        return res.status(400).json({ message: "platform_id does not reference an existing platform" });
+      }
+      throw err;
+    }
+
+    const [rows] = await db.query(
+      `${COMPETITOR_SELECT} WHERE co.competitor_id = ?`,
+      [id]
+    );
+    res.json(rows[0]);
+  })
+);
+
+app.delete(
+  "/competitors/:id",
+  asyncHandler(async (req, res) => {
+    // competitor_content rows cascade-delete automatically (FK ON DELETE CASCADE)
+    const [result] = await db.query(
+      "DELETE FROM competitors WHERE competitor_id = ?",
+      [req.params.id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Competitor not found" });
+    }
+    res.json({ message: "Competitor deleted" });
+  })
+);
+
+// ---- Competitor content: manually recorded public posts ----
+// engagement_rate reuses the exact formula used everywhere else in this
+// file — (likes + comments + shares) / views * 100, 0 when views = 0 —
+// so there is never a second, inconsistent engagement calculation.
+
+const COMPETITOR_CONTENT_SELECT = `
+  SELECT cc.competitor_content_id, cc.competitor_id, cc.title, cc.topic,
+         cc.published_at, cc.views, cc.likes, cc.comments, cc.shares, cc.source_url,
+         CASE WHEN cc.views = 0 THEN 0
+              ELSE ROUND((cc.likes + cc.comments + cc.shares) / cc.views * 100, 2)
+         END AS engagement_rate
+  FROM competitor_content cc
+`;
+
+app.get(
+  "/competitors/:id/content",
+  asyncHandler(async (req, res) => {
+    const [competitor] = await db.query(
+      "SELECT competitor_id FROM competitors WHERE competitor_id = ?",
+      [req.params.id]
+    );
+    if (competitor.length === 0) {
+      return res.status(404).json({ message: "Competitor not found" });
+    }
+
+    const params = [req.params.id];
+    let sql = `${COMPETITOR_CONTENT_SELECT} WHERE cc.competitor_id = ?`;
+    if (req.query.start) {
+      sql += " AND cc.published_at >= ?";
+      params.push(req.query.start);
+    }
+    if (req.query.end) {
+      sql += " AND cc.published_at <= ?";
+      params.push(req.query.end);
+    }
+    sql += " ORDER BY cc.published_at DESC";
+
+    const [rows] = await db.query(sql, params);
+    res.json(castNumbersAll(rows, ["views", "likes", "comments", "shares", "engagement_rate"]));
+  })
+);
+
+app.post(
+  "/competitors/:id/content",
+  asyncHandler(async (req, res) => {
+    const { title, topic, published_at, views, likes, comments, shares, source_url } =
+      req.body || {};
+    const competitorId = req.params.id;
+
+    const [competitor] = await db.query(
+      "SELECT competitor_id FROM competitors WHERE competitor_id = ?",
+      [competitorId]
+    );
+    if (competitor.length === 0) {
+      return res.status(404).json({ message: "Competitor not found" });
+    }
+    if (!title) {
+      return res.status(400).json({ message: "title is required" });
+    }
+
+    const [result] = await db.query(
+      `INSERT INTO competitor_content
+         (competitor_id, title, topic, published_at, views, likes, comments, shares, source_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        competitorId,
+        title,
+        topic || null,
+        published_at || null,
+        views || 0,
+        likes || 0,
+        comments || 0,
+        shares || 0,
+        source_url || null,
+      ]
+    );
+
+    const [rows] = await db.query(
+      `${COMPETITOR_CONTENT_SELECT} WHERE cc.competitor_content_id = ?`,
+      [result.insertId]
+    );
+    res.status(201).json(castNumbers(rows[0], ["views", "likes", "comments", "shares", "engagement_rate"]));
+  })
+);
+
+app.put(
+  "/competitor-content/:id",
+  asyncHandler(async (req, res) => {
+    const { title, topic, published_at, views, likes, comments, shares, source_url } =
+      req.body || {};
+    const { id } = req.params;
+
+    const [existing] = await db.query(
+      "SELECT * FROM competitor_content WHERE competitor_content_id = ?",
+      [id]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ message: "Competitor content not found" });
+    }
+
+    await db.query(
+      `UPDATE competitor_content SET
+         title = COALESCE(?, title),
+         topic = COALESCE(?, topic),
+         published_at = COALESCE(?, published_at),
+         views = COALESCE(?, views),
+         likes = COALESCE(?, likes),
+         comments = COALESCE(?, comments),
+         shares = COALESCE(?, shares),
+         source_url = COALESCE(?, source_url)
+       WHERE competitor_content_id = ?`,
+      [title, topic, published_at, views, likes, comments, shares, source_url, id]
+    );
+
+    const [rows] = await db.query(
+      `${COMPETITOR_CONTENT_SELECT} WHERE cc.competitor_content_id = ?`,
+      [id]
+    );
+    res.json(castNumbers(rows[0], ["views", "likes", "comments", "shares", "engagement_rate"]));
+  })
+);
+
+app.delete(
+  "/competitor-content/:id",
+  asyncHandler(async (req, res) => {
+    const [result] = await db.query(
+      "DELETE FROM competitor_content WHERE competitor_content_id = ?",
+      [req.params.id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Competitor content not found" });
+    }
+    res.json({ message: "Competitor content deleted" });
+  })
+);
+
+// ---- Competitor activity analytics ----
+// Posting frequency + average engagement per competitor over a rolling
+// window, placed next to the creator's own posting frequency + average
+// engagement over the IDENTICAL window, so the comparison the panel
+// asked for ("relative performance") is apples-to-apples. Reuses the
+// existing channel-scoping helper for the creator's YouTube figures —
+// no second scoping mechanism.
+
+app.get(
+  "/analytics/competitor-activity",
+  asyncHandler(async (req, res) => {
+    const days = Number(req.query.days) || 30;
+
+    const [competitorRows] = await db.query(
+      `
+      SELECT
+        co.competitor_id, co.name, p.platform_name,
+        COUNT(cc.competitor_content_id) AS postCount,
+        COALESCE(ROUND(AVG(
+          CASE WHEN cc.views = 0 THEN 0 ELSE (cc.likes + cc.comments + cc.shares) / cc.views * 100 END
+        ), 2), 0) AS averageEngagementRate,
+        COALESCE(SUM(cc.views), 0) AS totalViews
+      FROM competitors co
+      JOIN platforms p ON p.platform_id = co.platform_id
+      LEFT JOIN competitor_content cc
+        ON cc.competitor_id = co.competitor_id
+        AND cc.published_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      WHERE co.user_id = ?
+      GROUP BY co.competitor_id, co.name, p.platform_name
+      ORDER BY postCount DESC
+      `,
+      [days, DEFAULT_USER_ID]
+    );
+
+    const scoped = await hasChannelScopingColumn();
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+
+    const [creatorPublishedRows] = await db.query(
+      `SELECT COUNT(*) AS postCount
+       FROM scheduled_content
+       WHERE status = 'Published' AND published_at >= DATE_SUB(NOW(), INTERVAL ? DAY)`,
+      [days]
+    );
+
+    const [creatorEngagementRows] = await db.query(
+      `
+      SELECT COALESCE(ROUND(AVG(
+        CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
+      ), 2), 0) AS averageEngagementRate
+      FROM performance_metrics pm
+      JOIN platforms p ON p.platform_id = pm.platform_id
+      WHERE pm.recorded_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+        ${scoped ? `AND ${YT_CHANNEL_SCOPE_SQL}` : ""}
+      `,
+      scoped ? [days, currentChannelId] : [days]
+    );
+
+    res.json({
+      windowDays: days,
+      dataSource:
+        "Competitor figures are manually recorded by the creator from publicly visible posts — not synced from any live API.",
+      creator: {
+        postCount: Number(creatorPublishedRows[0].postCount),
+        averageEngagementRate: Number(creatorEngagementRows[0].averageEngagementRate),
+      },
+      competitors: castNumbersAll(competitorRows, ["postCount", "averageEngagementRate", "totalViews"]),
+    });
+  })
+);
+
+// =======================================================================
 // 404 HANDLER (must be registered after every route above, and before
 // the error handler below). Anything reaching this point matched no
 // static frontend file and no API route. Returning JSON here — instead
