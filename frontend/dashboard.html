@@ -128,6 +128,66 @@
                 </div>
             </section>
 
+            <!-- MISSED OPPORTUNITIES + RECOMMENDATIONS -->
+            <div class="dashboard-main-grid">
+                <section class="dashboard-card">
+                    <h3>Missed Opportunities</h3>
+                    <p>Topics your competitors are covering that you haven't, within their opportunity window.</p>
+                    <ul class="dashboard-opportunity-list" id="opportunityList"></ul>
+                    <div id="opportunityEmpty" class="empty-state is-hidden">
+                        No active opportunities detected. Add competitors and their content below to enable detection.
+                    </div>
+                </section>
+
+                <section class="dashboard-card">
+                    <h3>Recommendations</h3>
+                    <p>Rule-based suggestions generated from your planning, performance and opportunity data.</p>
+                    <ul class="dashboard-recommendation-list" id="recommendationList"></ul>
+                    <div id="recommendationEmpty" class="empty-state is-hidden">
+                        No active recommendations right now.
+                    </div>
+                </section>
+            </div>
+
+            <!-- COMPETITORS -->
+            <section class="dashboard-card">
+                <h3>Competitors Tracked (<span id="competitorCount">0</span>)</h3>
+                <p>Manually recorded from publicly visible posts — nothing here is scraped or fabricated.</p>
+
+                <ul class="dashboard-competitor-list" id="competitorList"></ul>
+                <div id="competitorEmpty" class="empty-state is-hidden">
+                    No competitors added yet. Add one below so opportunity detection has something to compare against.
+                </div>
+
+                <form id="addCompetitorForm" class="dashboard-inline-form">
+                    <input type="text" id="competitorName" placeholder="Competitor name" required>
+                    <select id="competitorPlatform" required>
+                        <option value="" disabled selected>Platform</option>
+                    </select>
+                    <input type="url" id="competitorUrl" placeholder="Profile URL (optional)">
+                    <button type="submit" class="quick-action-btn">+ Add Competitor</button>
+                </form>
+                <div id="competitorFormError" class="dashboard-error is-hidden"></div>
+
+                <h4>Log Competitor Content</h4>
+                <p>Record a public post so it can be checked against your own categories for missed-opportunity detection.</p>
+                <form id="addCompetitorContentForm" class="dashboard-inline-form">
+                    <select id="competitorContentCompetitor" required>
+                        <option value="" disabled selected>Competitor</option>
+                    </select>
+                    <input type="text" id="competitorContentTitle" placeholder="Post title" required>
+                    <input type="text" id="competitorContentTopic" placeholder="Topic (e.g. Faith, Technology)" required>
+                    <input type="date" id="competitorContentPublishedAt" required>
+                    <input type="number" id="competitorContentViews" placeholder="Views" min="0">
+                    <input type="number" id="competitorContentLikes" placeholder="Likes" min="0">
+                    <input type="number" id="competitorContentComments" placeholder="Comments" min="0">
+                    <input type="number" id="competitorContentShares" placeholder="Shares" min="0">
+                    <input type="url" id="competitorContentUrl" placeholder="Source URL (optional)">
+                    <button type="submit" class="quick-action-btn">+ Log Content</button>
+                </form>
+                <div id="competitorContentFormError" class="dashboard-error is-hidden"></div>
+            </section>
+
             <!-- QUICK ACTIONS -->
             <section class="dashboard-card">
                 <h3>Quick Actions</h3>

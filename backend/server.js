@@ -9,6 +9,8 @@ const session = require("express-session");
 const { passport, isGoogleOAuthConfigured } = require("./config/passport");
 const youtubeService = require("./services/youtubeService");
 const { classifyVideoMatch } = require("./services/videoMatcher");
+const opportunityEngine = require("./services/opportunityEngine");
+const recommendationEngine = require("./services/recommendationEngine");
 
 const app = express();
 
@@ -1835,49 +1837,52 @@ app.get(
 // Never divides by zero — an empty eligible set returns null, not 0.
 // =======================================================================
 
+// Shared by GET /analytics/consistency and the recommendation engine
+// (generateRecommendations() below) so there is exactly one
+// implementation of the consistency formula, not two. Does NOT call
+// updateMissedScheduledContent() itself — callers run that first, same
+// as before.
+async function computeOverallConsistency({ start, end } = {}) {
+  const params = [];
+  let sql = `
+    SELECT status, COUNT(*) AS count
+    FROM scheduled_content
+    WHERE status IN ('Published', 'Missed')
+  `;
+  if (start) {
+    sql += " AND scheduled_date >= ?";
+    params.push(start);
+  }
+  if (end) {
+    sql += " AND scheduled_date <= ?";
+    params.push(end);
+  }
+  sql += " GROUP BY status";
+
+  const [rows] = await db.query(sql, params);
+
+  let publishedCount = 0;
+  let missedCount = 0;
+  for (const row of rows) {
+    if (row.status === "Published") publishedCount = Number(row.count);
+    if (row.status === "Missed") missedCount = Number(row.count);
+  }
+
+  const eligibleContent = publishedCount + missedCount;
+  const consistencyPercentage =
+    eligibleContent === 0
+      ? null
+      : Number(((publishedCount / eligibleContent) * 100).toFixed(2));
+
+  return { eligibleContent, publishedCount, missedCount, consistencyPercentage };
+}
+
 app.get(
   "/analytics/consistency",
   asyncHandler(async (req, res) => {
     await updateMissedScheduledContent();
-
-    const { start, end } = req.query;
-    const params = [];
-    let sql = `
-      SELECT status, COUNT(*) AS count
-      FROM scheduled_content
-      WHERE status IN ('Published', 'Missed')
-    `;
-    if (start) {
-      sql += " AND scheduled_date >= ?";
-      params.push(start);
-    }
-    if (end) {
-      sql += " AND scheduled_date <= ?";
-      params.push(end);
-    }
-    sql += " GROUP BY status";
-
-    const [rows] = await db.query(sql, params);
-
-    let publishedCount = 0;
-    let missedCount = 0;
-    for (const row of rows) {
-      if (row.status === "Published") publishedCount = Number(row.count);
-      if (row.status === "Missed") missedCount = Number(row.count);
-    }
-
-    const eligibleContent = publishedCount + missedCount;
-    const consistencyPercentage =
-      eligibleContent === 0
-        ? null
-        : Number(((publishedCount / eligibleContent) * 100).toFixed(2));
-
-    res.json({
-      eligibleContent,
-      publishedCount,
-      missedCount,
-      consistencyPercentage,
-    });
+    const result = await computeOverallConsistency(req.query);
+    res.json(result);
   })
 );
 
@@ -2128,11 +2133,51 @@ app.get(
       ? castNumbers(latestPerfRows[0], ["views", "likes", "comments", "shares", "engagement_rate"])
       : null;
 
+    // ---- Missed opportunities (top 5 active, highest score first) ----
+    // Reuses the same detection pass GET /opportunities runs — calling it
+    // here too keeps the dashboard's snapshot fresh without a second,
+    // competing detection implementation. detectMissedOpportunities() and
+    // generateRecommendations() are declared with `function` further down
+    // this file, so they are hoisted and safe to call from this earlier
+    // handler.
+    await detectMissedOpportunities();
+    const [topOpportunityRows] = await db.query(
+      `SELECT * FROM opportunities WHERE user_id = ? AND status = 'Active'
+       ORDER BY opportunity_score DESC, detected_at DESC LIMIT 5`,
+      [DEFAULT_USER_ID]
+    );
+    const topOpportunities = castNumbersAll(topOpportunityRows, [
+      "relevance_score",
+      "competitor_activity_score",
+      "engagement_score",
+      "timeliness_score",
+      "opportunity_score",
+    ]);
+
+    // ---- Recommendations (top 5 active, most recent first) ----
+    await generateRecommendations();
+    const [topRecommendations] = await db.query(
+      `SELECT * FROM recommendations WHERE user_id = ? AND status = 'Active'
+       ORDER BY created_at DESC LIMIT 5`,
+      [DEFAULT_USER_ID]
+    );
+
+    // ---- Competitors tracked (count only — full list lives on demand
+    // via GET /competitors, called from the dashboard's "add competitor"
+    // panel) ----
+    const [[competitorCountRow]] = await db.query(
+      "SELECT COUNT(*) AS count FROM competitors WHERE user_id = ?",
+      [DEFAULT_USER_ID]
+    );
+
     res.json({
       contentSummary: { total, draft, scheduled, published },
       upcomingContent,
       platforms,
       latestPerformance,
+      opportunities: topOpportunities,
+      recommendations: topRecommendations,
+      competitorsTracked: Number(competitorCountRow.count) || 0,
     });
   })
 );
@@ -2467,6 +2512,566 @@ app.get(
       },
       competitors: castNumbersAll(competitorRows, ["postCount", "averageEngagementRate", "totalViews"]),
     });
+  })
+);
+
+// =======================================================================
+// MISSED OPPORTUNITY DETECTION (rule-based — see backend/services/
+// opportunityEngine.js for the scoring formulas, which are pure
+// functions with no DB access so they can be unit-tested on their own).
+//
+// Topic source: competitor_content.topic (recorded in the COMPETITORS
+// section above). We deliberately do NOT use the `events` table here —
+// it has no data, no routes, and no UI, and building all of that just to
+// seed topics would duplicate what competitor_content already gives us
+// for real. `opportunities.event_id` stays nullable/unused for now.
+//
+// DATA -> ANALYSIS -> RULE -> RECOMMENDATION, applied here as:
+//   1. Group recent competitor_content by topic (DATA).
+//   2. Check the topic against categories the creator actually uses,
+//      and check whether the creator already published something
+//      matching it (ANALYSIS).
+//   3. Relevant + competitor activity + not covered => missed
+//      opportunity (RULE).
+//   4. Score + classify it (this section produces the opportunity;
+//      Phase 9 turns qualifying opportunities into a recommendation).
+// =======================================================================
+
+// The creator's "defined content scope" = category names they have
+// actually attached to at least one piece of their own content. If they
+// haven't categorised anything yet, there is nothing to match relevance
+// against, so detection correctly finds zero opportunities rather than
+// guessing.
+async function getCreatorCategoryScope() {
+  const [rows] = await db.query(
+    `SELECT DISTINCT cat.category_name
+     FROM content_categories ccat
+     JOIN content c ON c.content_id = ccat.content_id
+     JOIN categories cat ON cat.category_id = ccat.category_id
+     WHERE c.user_id = ?`,
+    [DEFAULT_USER_ID]
+  );
+  return rows.map((r) => r.category_name);
+}
+
+// Relevance check for one candidate topic against the creator's scope.
+// Returns { relevant, categoryMatched } — categoryMatched drives which
+// of the two documented relevance tiers applies (see opportunityEngine).
+function checkTopicRelevance(topicLabel, competitorCategories, creatorCategories) {
+  const topicLower = String(topicLabel || "").toLowerCase();
+  const competitorCategoryList = String(competitorCategories || "")
+    .split(",")
+    .map((c) => c.trim().toLowerCase())
+    .filter(Boolean);
+
+  for (const creatorCategory of creatorCategories) {
+    const creatorCategoryLower = creatorCategory.toLowerCase();
+    if (competitorCategoryList.includes(creatorCategoryLower)) {
+      return { relevant: true, categoryMatched: true };
+    }
+  }
+  for (const creatorCategory of creatorCategories) {
+    if (topicLower.includes(creatorCategory.toLowerCase())) {
+      return { relevant: true, categoryMatched: false };
+    }
+  }
+  return { relevant: false, categoryMatched: false };
+}
+
+// Has the creator already published something matching this topic in
+// the same window? A simple case-insensitive substring match against
+// title/description — transparent and easy to verify by hand, unlike a
+// fuzzy/ML approach.
+async function creatorHasCoveredTopic(topicLabel, windowDays) {
+  const likePattern = `%${String(topicLabel).toLowerCase()}%`;
+  const [rows] = await db.query(
+    `SELECT COUNT(*) AS cnt
+     FROM content c
+     JOIN scheduled_content sc ON sc.content_id = c.content_id
+     WHERE c.user_id = ?
+       AND sc.status = 'Published'
+       AND sc.published_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+       AND (LOWER(c.title) LIKE ? OR LOWER(c.description) LIKE ?)`,
+    [DEFAULT_USER_ID, windowDays, likePattern, likePattern]
+  );
+  return Number(rows[0].cnt) > 0;
+}
+
+/**
+ * Runs the full detection pass and upserts qualifying opportunities.
+ * Returns { created, updated, skipped } counts for a clear before/after
+ * when demonstrating this feature.
+ */
+async function detectMissedOpportunities() {
+  const windowDays = opportunityEngine.OPPORTUNITY_WINDOW_DAYS;
+  const result = { created: 0, updated: 0, skipped: 0 };
+
+  const creatorCategories = await getCreatorCategoryScope();
+  if (creatorCategories.length === 0) {
+    // No categorised content yet -> no defined scope to match against.
+    // Correct empty state, not an error.
+    return result;
+  }
+
+  const [candidates] = await db.query(
+    `SELECT
+       LOWER(TRIM(cc.topic)) AS topic_key,
+       MIN(cc.topic) AS topic_label,
+       COUNT(DISTINCT cc.competitor_id) AS competitorCount,
+       MAX(cc.published_at) AS latestPostDate,
+       COALESCE(ROUND(AVG(
+         CASE WHEN cc.views = 0 THEN 0 ELSE (cc.likes + cc.comments + cc.shares) / cc.views * 100 END
+       ), 2), 0) AS avgEngagementRate,
+       GROUP_CONCAT(DISTINCT co.category SEPARATOR ',') AS competitorCategories
+     FROM competitor_content cc
+     JOIN competitors co ON co.competitor_id = cc.competitor_id
+     WHERE co.user_id = ?
+       AND cc.topic IS NOT NULL AND TRIM(cc.topic) <> ''
+       AND cc.published_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+     GROUP BY topic_key`,
+    [DEFAULT_USER_ID, windowDays]
+  );
+
+  for (const candidate of candidates) {
+    const { relevant, categoryMatched } = checkTopicRelevance(
+      candidate.topic_label,
+      candidate.competitorCategories,
+      creatorCategories
+    );
+    if (!relevant) {
+      result.skipped++;
+      continue;
+    }
+
+    const covered = await creatorHasCoveredTopic(candidate.topic_label, windowDays);
+    if (covered) {
+      result.skipped++;
+      continue;
+    }
+
+    const daysSinceLatestPost = candidate.latestPostDate
+      ? (Date.now() - new Date(candidate.latestPostDate).getTime()) / (1000 * 60 * 60 * 24)
+      : null;
+
+    const relevanceScore = opportunityEngine.computeRelevanceScore(categoryMatched);
+    const competitorActivityScore = opportunityEngine.computeCompetitorActivityScore(
+      Number(candidate.competitorCount)
+    );
+    const engagementScore = opportunityEngine.computeEngagementScore(candidate.avgEngagementRate);
+    const timelinessScore = opportunityEngine.computeTimelinessScore(daysSinceLatestPost, windowDays);
+    const { opportunityScore, impactLevel } = opportunityEngine.computeOpportunityScore({
+      relevance: relevanceScore,
+      competitorActivity: competitorActivityScore,
+      engagement: engagementScore,
+      timeliness: timelinessScore,
+    });
+
+    const title = `Missed opportunity: ${candidate.topic_label}`;
+    const description =
+      `${candidate.competitorCount} competitor(s) posted about "${candidate.topic_label}" ` +
+      `in the last ${windowDays} days (average engagement ${candidate.avgEngagementRate}%). ` +
+      `No matching published content was found in the same window.`;
+    const deadline = candidate.latestPostDate
+      ? new Date(new Date(candidate.latestPostDate).getTime() + windowDays * 24 * 60 * 60 * 1000)
+      : null;
+
+    const [existing] = await db.query(
+      `SELECT opportunity_id FROM opportunities
+       WHERE user_id = ? AND title = ? AND status = 'Active'`,
+      [DEFAULT_USER_ID, title]
+    );
+
+    if (existing.length > 0) {
+      await db.query(
+        `UPDATE opportunities SET
+           description = ?, opportunity_deadline = ?,
+           relevance_score = ?, competitor_activity_score = ?,
+           engagement_score = ?, timeliness_score = ?,
+           opportunity_score = ?, impact_level = ?
+         WHERE opportunity_id = ?`,
+        [
+          description, deadline,
+          relevanceScore, competitorActivityScore,
+          engagementScore, timelinessScore,
+          opportunityScore, impactLevel,
+          existing[0].opportunity_id,
+        ]
+      );
+      result.updated++;
+    } else {
+      await db.query(
+        `INSERT INTO opportunities
+           (user_id, event_id, title, description, detected_at, opportunity_deadline,
+            relevance_score, competitor_activity_score, engagement_score, timeliness_score,
+            opportunity_score, impact_level, status)
+         VALUES (?, NULL, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, 'Active')`,
+        [
+          DEFAULT_USER_ID, title, description, deadline,
+          relevanceScore, competitorActivityScore,
+          engagementScore, timelinessScore,
+          opportunityScore, impactLevel,
+        ]
+      );
+      result.created++;
+    }
+  }
+
+  return result;
+}
+
+app.get(
+  "/opportunities",
+  asyncHandler(async (req, res) => {
+    await detectMissedOpportunities();
+
+    const params = [DEFAULT_USER_ID];
+    let sql = "SELECT * FROM opportunities WHERE user_id = ?";
+    if (req.query.status) {
+      sql += " AND status = ?";
+      params.push(req.query.status);
+    }
+    sql += " ORDER BY opportunity_score DESC, detected_at DESC";
+
+    const [rows] = await db.query(sql, params);
+    res.json(
+      castNumbersAll(rows, [
+        "relevance_score",
+        "competitor_activity_score",
+        "engagement_score",
+        "timeliness_score",
+        "opportunity_score",
+      ])
+    );
+  })
+);
+
+app.get(
+  "/opportunities/:id",
+  asyncHandler(async (req, res) => {
+    const [rows] = await db.query("SELECT * FROM opportunities WHERE opportunity_id = ?", [
+      req.params.id,
+    ]);
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Opportunity not found" });
+    }
+    res.json(
+      castNumbers(rows[0], [
+        "relevance_score",
+        "competitor_activity_score",
+        "engagement_score",
+        "timeliness_score",
+        "opportunity_score",
+      ])
+    );
+  })
+);
+
+const OPPORTUNITY_STATUSES = ["Active", "Actioned", "Dismissed"];
+
+app.put(
+  "/opportunities/:id",
+  asyncHandler(async (req, res) => {
+    const { status } = req.body || {};
+    const { id } = req.params;
+
+    if (!status || !OPPORTUNITY_STATUSES.includes(status)) {
+      return res.status(400).json({
+        message: `status must be one of: ${OPPORTUNITY_STATUSES.join(", ")}`,
+      });
+    }
+
+    const [existing] = await db.query("SELECT * FROM opportunities WHERE opportunity_id = ?", [id]);
+    if (existing.length === 0) {
+      return res.status(404).json({ message: "Opportunity not found" });
+    }
+
+    await db.query("UPDATE opportunities SET status = ? WHERE opportunity_id = ?", [status, id]);
+
+    const [rows] = await db.query("SELECT * FROM opportunities WHERE opportunity_id = ?", [id]);
+    res.json(
+      castNumbers(rows[0], [
+        "relevance_score",
+        "competitor_activity_score",
+        "engagement_score",
+        "timeliness_score",
+        "opportunity_score",
+      ])
+    );
+  })
+);
+
+app.delete(
+  "/opportunities/:id",
+  asyncHandler(async (req, res) => {
+    const [result] = await db.query("DELETE FROM opportunities WHERE opportunity_id = ?", [
+      req.params.id,
+    ]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Opportunity not found" });
+    }
+    res.json({ message: "Opportunity deleted" });
+  })
+);
+
+// Explicit trigger (in addition to the auto-run on every GET /opportunities,
+// same convention as updateMissedScheduledContent()) — useful for a clean
+// before/after moment in a demo or test.
+app.post(
+  "/opportunities/detect",
+  asyncHandler(async (req, res) => {
+    const result = await detectMissedOpportunities();
+    res.json(result);
+  })
+);
+
+// =======================================================================
+// RECOMMENDATION ENGINE (rule-based — see backend/services/
+// recommendationEngine.js for the four threshold checks, which are pure
+// functions with no DB access so they can be unit-tested on their own).
+//
+// DATA -> ANALYSIS -> RULE -> RECOMMENDATION, applied here as:
+//   1. Reuse the existing consistency / performance / competitor-activity
+//      queries and opportunity rows (DATA + ANALYSIS — no second copy of
+//      any formula).
+//   2. Pass the resulting numbers into recommendationEngine's threshold
+//      checks (RULE).
+//   3. Build the explainable message/reason text and upsert a row
+//      (RECOMMENDATION).
+//
+// Each recommendation type keeps a STABLE message per subject (the
+// category name, the opportunity title, the competitor name) so
+// re-running this on the same subject updates the existing Active row's
+// `reason` with fresh numbers instead of creating a duplicate.
+// =======================================================================
+
+async function upsertRecommendation({ type, message, reason, opportunityId = null }) {
+  const [existing] = await db.query(
+    `SELECT recommendation_id FROM recommendations
+     WHERE recommendation_type = ? AND message = ? AND status = 'Active'`,
+    [type, message]
+  );
+
+  if (existing.length > 0) {
+    await db.query(`UPDATE recommendations SET reason = ? WHERE recommendation_id = ?`, [
+      reason,
+      existing[0].recommendation_id,
+    ]);
+    return "updated";
+  }
+
+  await db.query(
+    `INSERT INTO recommendations (user_id, opportunity_id, recommendation_type, message, reason, status)
+     VALUES (?, ?, ?, ?, ?, 'Active')`,
+    [DEFAULT_USER_ID, opportunityId, type, message, reason]
+  );
+  return "created";
+}
+
+/**
+ * Runs all four recommendation rules and upserts qualifying
+ * recommendations. Returns { created, updated, skipped } counts for a
+ * clear before/after when demonstrating this feature.
+ */
+async function generateRecommendations() {
+  const result = { created: 0, updated: 0, skipped: 0 };
+  const record = (outcome) => {
+    result[outcome === "created" ? "created" : outcome === "updated" ? "updated" : "skipped"]++;
+  };
+
+  // ---- Rule 1: low posting consistency ----
+  await updateMissedScheduledContent();
+  const consistency = await computeOverallConsistency();
+  if (
+    recommendationEngine.qualifiesForConsistencyReview(
+      consistency.consistencyPercentage,
+      consistency.eligibleContent
+    )
+  ) {
+    record(
+      await upsertRecommendation({
+        type: "ReviewMissedContent",
+        message: "Review your missed scheduled content",
+        reason:
+          `Posting consistency is ${consistency.consistencyPercentage}% ` +
+          `(${consistency.publishedCount} published / ${consistency.missedCount} missed ` +
+          `out of ${consistency.eligibleContent} eligible items), below the ${recommendationEngine.CONSISTENCY_LOW_THRESHOLD}% target.`,
+      })
+    );
+  } else {
+    result.skipped++;
+  }
+
+  // ---- Rule 2: a category clearly outperforms the creator's overall average ----
+  const [[overallRow]] = await db.query(
+    `SELECT COALESCE(ROUND(AVG(
+       CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
+     ), 2), 0) AS averageEngagementRate
+     FROM performance_metrics pm`
+  );
+  const overallAvgEngagement = Number(overallRow.averageEngagementRate);
+
+  const [categoryRows] = await db.query(
+    `SELECT cat.category_name,
+            COUNT(DISTINCT pm.metric_id) AS contentCount,
+            COALESCE(ROUND(AVG(
+              CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
+            ), 2), 0) AS averageEngagementRate
+     FROM content_categories ccat
+     JOIN categories cat ON cat.category_id = ccat.category_id
+     JOIN performance_metrics pm ON pm.content_id = ccat.content_id
+     GROUP BY cat.category_id, cat.category_name`
+  );
+  for (const row of categoryRows) {
+    const avg = Number(row.averageEngagementRate);
+    const count = Number(row.contentCount);
+    if (recommendationEngine.qualifiesForCategoryRecommendation(avg, count, overallAvgEngagement)) {
+      record(
+        await upsertRecommendation({
+          type: "ProduceMoreInCategory",
+          message: `Consider producing more content in the "${row.category_name}" category`,
+          reason:
+            `Average engagement rate for "${row.category_name}" is ${avg}% across ${count} ` +
+            `tracked item(s), vs your overall average of ${overallAvgEngagement}%.`,
+        })
+      );
+    } else {
+      result.skipped++;
+    }
+  }
+
+  // ---- Rule 3: a still-actionable High-impact opportunity ----
+  const [opportunityRows] = await db.query(
+    `SELECT * FROM opportunities WHERE user_id = ? AND status = 'Active'`,
+    [DEFAULT_USER_ID]
+  );
+  for (const opp of opportunityRows) {
+    if (recommendationEngine.qualifiesForOpportunityAction(opp)) {
+      record(
+        await upsertRecommendation({
+          type: "ActOnOpportunity",
+          message: `Act on the "${opp.title}" opportunity`,
+          reason:
+            `This opportunity scored ${opp.opportunity_score} (High impact). ` +
+            (opp.opportunity_deadline
+              ? `It remains actionable until ${new Date(opp.opportunity_deadline).toISOString().slice(0, 10)}.`
+              : `It has no fixed deadline.`),
+          opportunityId: opp.opportunity_id,
+        })
+      );
+    } else {
+      result.skipped++;
+    }
+  }
+
+  // ---- Rule 4: a tracked competitor significantly outperforms the creator ----
+  const [creatorEngagementRows] = await db.query(
+    `SELECT COALESCE(ROUND(AVG(
+       CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
+     ), 2), 0) AS averageEngagementRate
+     FROM performance_metrics pm
+     WHERE pm.recorded_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`
+  );
+  const creatorAvgEngagement = Number(creatorEngagementRows[0].averageEngagementRate);
+
+  const [competitorRows] = await db.query(
+    `SELECT co.name,
+            COUNT(cc.competitor_content_id) AS postCount,
+            COALESCE(ROUND(AVG(
+              CASE WHEN cc.views = 0 THEN 0 ELSE (cc.likes + cc.comments + cc.shares) / cc.views * 100 END
+            ), 2), 0) AS averageEngagementRate
+     FROM competitors co
+     LEFT JOIN competitor_content cc
+       ON cc.competitor_id = co.competitor_id
+       AND cc.published_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+     WHERE co.user_id = ?
+     GROUP BY co.competitor_id, co.name`,
+    [DEFAULT_USER_ID]
+  );
+  for (const row of competitorRows) {
+    const avg = Number(row.averageEngagementRate);
+    const count = Number(row.postCount);
+    if (recommendationEngine.qualifiesForCompetitorReview(avg, count, creatorAvgEngagement)) {
+      record(
+        await upsertRecommendation({
+          type: "ReviewCompetitorPatterns",
+          message: `Review "${row.name}"'s recent content patterns`,
+          reason:
+            `"${row.name}" averaged ${avg}% engagement over ${count} recent post(s), ` +
+            `vs your ${creatorAvgEngagement}% over the same 30-day window.`,
+        })
+      );
+    } else {
+      result.skipped++;
+    }
+  }
+
+  return result;
+}
+
+app.get(
+  "/recommendations",
+  asyncHandler(async (req, res) => {
+    await generateRecommendations();
+
+    const params = [DEFAULT_USER_ID];
+    let sql = "SELECT * FROM recommendations WHERE user_id = ?";
+    if (req.query.status) {
+      sql += " AND status = ?";
+      params.push(req.query.status);
+    }
+    sql += " ORDER BY created_at DESC";
+
+    const [rows] = await db.query(sql, params);
+    res.json(rows);
+  })
+);
+
+const RECOMMENDATION_STATUSES = ["Active", "Actioned", "Dismissed"];
+
+app.put(
+  "/recommendations/:id",
+  asyncHandler(async (req, res) => {
+    const { status } = req.body || {};
+    const { id } = req.params;
+
+    if (!status || !RECOMMENDATION_STATUSES.includes(status)) {
+      return res.status(400).json({
+        message: `status must be one of: ${RECOMMENDATION_STATUSES.join(", ")}`,
+      });
+    }
+
+    const [existing] = await db.query("SELECT * FROM recommendations WHERE recommendation_id = ?", [id]);
+    if (existing.length === 0) {
+      return res.status(404).json({ message: "Recommendation not found" });
+    }
+
+    await db.query("UPDATE recommendations SET status = ? WHERE recommendation_id = ?", [status, id]);
+
+    const [rows] = await db.query("SELECT * FROM recommendations WHERE recommendation_id = ?", [id]);
+    res.json(rows[0]);
+  })
+);
+
+app.delete(
+  "/recommendations/:id",
+  asyncHandler(async (req, res) => {
+    const [result] = await db.query("DELETE FROM recommendations WHERE recommendation_id = ?", [
+      req.params.id,
+    ]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Recommendation not found" });
+    }
+    res.json({ message: "Recommendation deleted" });
+  })
+);
+
+// Explicit trigger, same convention as POST /opportunities/detect —
+// useful for a clean before/after moment in a demo or test.
+app.post(
+  "/recommendations/generate",
+  asyncHandler(async (req, res) => {
+    const result = await generateRecommendations();
+    res.json(result);
   })
 );
 
