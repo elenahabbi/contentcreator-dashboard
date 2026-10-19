@@ -6,12 +6,15 @@
     <title>Dashboard</title>
     <link rel="stylesheet" href="style.css">
 </head>
+    <script src="auth-guard.js"></script>
 <body>
 
 
 <div class="parent-all">
     <div class="sidePanel">
         <h2>ContentCreator</h2>
+                <p id="loggedInAs" style="font-size:0.8rem;opacity:0.7;"></p>
+        <a href="#" id="logoutBtn" style="display:block;margin-bottom:0.5rem;">Log out</a>
         <ul>
         <li class="activeTab"><a href="dashboard.html">
             Dashboard</a>
@@ -132,10 +135,10 @@
             <div class="dashboard-main-grid">
                 <section class="dashboard-card">
                     <h3>Missed Opportunities</h3>
-                    <p>Topics your competitors are covering that you haven't, within their opportunity window.</p>
+                                        <p>Content ideas detected from your own topics, publishing history, schedule, events and analytics.</p>
                     <ul class="dashboard-opportunity-list" id="opportunityList"></ul>
                     <div id="opportunityEmpty" class="empty-state is-hidden">
-                        No active opportunities detected. Add competitors and their content below to enable detection.
+                        No active opportunities detected yet. Create content, schedule posts, add relevant events, or connect YouTube to give the opportunity engine data to evaluate.
                     </div>
                 </section>
 
@@ -149,6 +152,30 @@
                 </section>
             </div>
 
+                        <!-- CREATOR EVENTS -->
+            <section class="dashboard-card">
+                <h3>Creator Events</h3>
+                <p>Dates that matter to your content, such as holidays, conferences or series launches. These are separate from scheduled posts on the calendar. An event only becomes an opportunity when its title, description or keywords mention one of your content topics.</p>
+
+                <div id="eventLoading" class="empty-state">Loading events...</div>
+                <div id="eventListError" class="dashboard-error is-hidden"></div>
+                <ul class="dashboard-opportunity-list" id="eventList"></ul>
+                <div id="eventEmpty" class="empty-state is-hidden">
+                    No events yet. Add one below.
+                </div>
+
+                <form id="eventForm" class="dashboard-inline-form" novalidate>
+                    <input type="hidden" id="eventEditId">
+                    <input type="text" id="eventTitleInput" placeholder="Event title" maxlength="200" required>
+                    <input type="date" id="eventDateInput" required>
+                    <input type="text" id="eventKeywordsInput" placeholder="Keywords, comma-separated (optional)" maxlength="1000">
+                    <input type="text" id="eventDescriptionInput" placeholder="Description (optional)" maxlength="2000">
+                    <button type="submit" class="quick-action-btn" id="eventSubmitBtn">+ Add Event</button>
+                    <button type="button" class="quick-action-btn is-hidden" id="eventCancelEditBtn">Cancel</button>
+                </form>
+                <div id="eventFormError" class="dashboard-error is-hidden"></div>
+            </section>
+            
             <!-- COMPETITORS -->
             <section class="dashboard-card">
                 <h3>Competitors Tracked (<span id="competitorCount">0</span>)</h3>
@@ -203,6 +230,7 @@
 </div>
 
 <script src="dashboard.js"></script>
+<script>wireLogoutButton();</script>
 
 </body>
 </html>

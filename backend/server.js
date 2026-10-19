@@ -6,15 +6,47 @@ const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
 const session = require("express-session");
+const bcrypt = require("bcryptjs");
 const { passport, isGoogleOAuthConfigured } = require("./config/passport");
 const youtubeService = require("./services/youtubeService");
 const { classifyVideoMatch } = require("./services/videoMatcher");
 const opportunityEngine = require("./services/opportunityEngine");
+const eventRules = require("./services/eventRules");
 const recommendationEngine = require("./services/recommendationEngine");
 
 const app = express();
 
-app.use(cors());
+const corsOrigin = process.env.FRONTEND_URL || "http://localhost:3000";
+
+// The frontend is sometimes opened through VS Code Live Server (for example
+// http://127.0.0.1:5500) during local development instead of being served by
+// Express itself. Keep the configured FRONTEND_URL as the primary origin,
+// but also allow local loopback origins so the browser can send the existing
+// session cookie to the API. This does not open CORS to arbitrary websites.
+function isAllowedCorsOrigin(origin) {
+  if (!origin || origin === corsOrigin) return true;
+
+  try {
+    const url = new URL(origin);
+    const isLocalLoopback =
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1") &&
+      (url.protocol === "http:" || url.protocol === "https:");
+
+    return isLocalLoopback;
+  } catch {
+    return false;
+  }
+}
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (isAllowedCorsOrigin(origin)) return callback(null, true);
+      return callback(new Error("CORS origin is not allowed."));
+    },
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 // Serves the existing vanilla frontend as-is (no build step, no changes
@@ -38,6 +70,12 @@ if (!process.env.SESSION_SECRET) {
   );
 }
 
+// PHASE 1: this session cookie now backs two things that share the same
+// browser session — Passport's short OAuth round-trip (see config/passport.js)
+// and the real "am I logged in" state for the app (req.session.userId, set
+// by /auth/login and /auth/register below). It needs to survive more than a
+// few minutes for that second use, so the maxAge below is now a real login
+// duration, not just "long enough for a redirect to Google and back".
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "dev-only-insecure-secret-change-me",
@@ -47,7 +85,7 @@ app.use(
       httpOnly: true,
       sameSite: "lax",
       secure: false, // set true once the app is served over HTTPS
-      maxAge: 5 * 60 * 1000, // only needs to survive the OAuth round-trip
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days — a real login session, not just an OAuth round-trip
     },
   })
 );
@@ -61,14 +99,27 @@ app.use(passport.session());
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 // ---------------------------------------------------------------------
-// TEMPORARY SINGLE-USER ASSUMPTION
-// This project currently has no login/session system, but content_id
-// requires a valid users.user_id (foreign key). Until auth is added,
-// every write uses this fixed user. Seed it once with:
-//   INSERT INTO users (username, email, password_hash) VALUES ('elena', 'elena@example.com', 'placeholder');
-// and set its real id below (or via DEFAULT_USER_ID in .env).
+// PHASE 1 — APPLICATION AUTHENTICATION
+// Replaces the old DEFAULT_USER_ID single-user assumption. Every route
+// that reads/writes a specific creator's data now gets that creator's
+// real id from req.session.userId (set by /auth/login or /auth/register
+// below), never from a fixed constant and never from anything the client
+// sends. requireAuth() rejects any request with no active session before
+// the route handler ever runs; getUserId() is a small helper so route
+// code reads req.session.userId in one consistent place.
 // ---------------------------------------------------------------------
-const DEFAULT_USER_ID = Number(process.env.DEFAULT_USER_ID) || 1;
+const SALT_ROUNDS = 10;
+
+function requireAuth(req, res, next) {
+  if (!req.session || !req.session.userId) {
+    return res.status(401).json({ message: "Authentication required. Please log in." });
+  }
+  next();
+}
+
+function getUserId(req) {
+  return req.session.userId;
+}
 
 // DATABASE CONNECTION (pooled, promise-based)
 const db = mysql.createPool({
@@ -93,6 +144,122 @@ db.getConnection()
 const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
+
+// =======================================================================
+// APPLICATION AUTHENTICATION (Phase 1)
+// This is the real "who is using this app" login system — separate from
+// the Google OAuth flow further down, which only ever connects a YouTube
+// channel and never establishes an app session by itself. These four
+// routes are the only ones that write/read req.session.userId directly;
+// every other route below either requires it via requireAuth() or reads
+// it via getUserId(req).
+// =======================================================================
+
+// A fixed, pre-computed bcrypt hash of a random value that is never a
+// real password. Used only when no matching user is found, so that
+// /auth/login always performs one bcrypt.compare() call either way —
+// this keeps a wrong-username response and a wrong-password response
+// taking roughly the same amount of time, instead of a missing user
+// short-circuiting instantly and leaking (via timing) whether a given
+// username/email exists.
+const DUMMY_PASSWORD_HASH = "$2a$10$CwTycUXWue0Thq9StjUM0uJ8u1QAaAO7lCXQ3iH8/Y7t8u5m1Q7dK";
+
+app.post(
+  "/auth/register",
+  asyncHandler(async (req, res) => {
+    const { username, email, password } = req.body || {};
+
+    if (!username || !email || !password) {
+      return res.status(400).json({ message: "username, email and password are required" });
+    }
+    if (String(password).length < 8) {
+      return res.status(400).json({ message: "password must be at least 8 characters" });
+    }
+
+    const passwordHash = await bcrypt.hash(String(password), SALT_ROUNDS);
+
+    let insertId;
+    try {
+      const [result] = await db.query(
+        `INSERT INTO users (username, email, password_hash, created_at)
+         VALUES (?, ?, ?, NOW())`,
+        [username, email, passwordHash]
+      );
+      insertId = result.insertId;
+    } catch (err) {
+      if (err.code === "ER_DUP_ENTRY") {
+        return res.status(409).json({ message: "That username or email is already registered." });
+      }
+      throw err;
+    }
+
+    req.session.regenerate((err) => {
+      if (err) return res.status(500).json({ message: "Could not start session after registration" });
+      req.session.userId = insertId;
+      res.status(201).json({ user_id: insertId, username, email });
+    });
+  })
+);
+
+app.post(
+  "/auth/login",
+  asyncHandler(async (req, res) => {
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ message: "username (or email) and password are required" });
+    }
+
+    const [rows] = await db.query(
+      "SELECT user_id, username, email, password_hash FROM users WHERE username = ? OR email = ? LIMIT 1",
+      [username, username]
+    );
+    const user = rows[0];
+
+    // See DUMMY_PASSWORD_HASH above: this bcrypt.compare() always runs,
+    // whether or not `user` was found, so login timing doesn't reveal
+    // whether the username/email exists.
+    const passwordMatches = await bcrypt.compare(
+      String(password),
+      (user && user.password_hash) || DUMMY_PASSWORD_HASH
+    );
+
+    if (!user || !user.password_hash || !passwordMatches) {
+      return res.status(401).json({ message: "Invalid username or password" });
+    }
+
+    req.session.regenerate((err) => {
+      if (err) return res.status(500).json({ message: "Could not start session" });
+      req.session.userId = user.user_id;
+      res.json({ user_id: user.user_id, username: user.username, email: user.email });
+    });
+  })
+);
+
+app.post("/auth/logout", (req, res) => {
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ message: "Could not log out" });
+    res.clearCookie("connect.sid");
+    res.json({ message: "Logged out" });
+  });
+});
+
+app.get(
+  "/auth/me",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const [rows] = await db.query(
+      "SELECT user_id, username, email, youtube_channel_id FROM users WHERE user_id = ?",
+      [getUserId(req)]
+    );
+    if (rows.length === 0) {
+      // The logged-in user's row no longer exists (deleted directly in
+      // the DB) — treat the session as no longer valid.
+      req.session.destroy(() => {});
+      return res.status(401).json({ message: "Not logged in" });
+    }
+    res.json(rows[0]);
+  })
+);
 
 // =======================================================================
 // AUTOMATIC MISSED-CONTENT DETECTION
@@ -148,10 +315,10 @@ function castNumbersAll(rows, fields) {
 //     throwing a SQL error, if it hasn't.
 // =======================================================================
 
-async function getConnectedYoutubeChannelId() {
+async function getConnectedYoutubeChannelId(userId) {
   const [rows] = await db.query(
     "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 1",
-    [DEFAULT_USER_ID]
+    [userId]
   );
   return (rows[0] && rows[0].youtube_channel_id) || null;
 }
@@ -291,15 +458,14 @@ async function setContentCategories(contentId, categoryIds) {
 
 app.get(
   "/content",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const params = [];
-    let sql = "SELECT * FROM content";
-    if (req.query.user_id) {
-      sql += " WHERE user_id = ?";
-      params.push(req.query.user_id);
-    }
-    sql += " ORDER BY created_at DESC";
-    const [rows] = await db.query(sql, params);
+    // Always scoped to the logged-in user — a user_id in the query string
+    // (the old behaviour) is never trusted; it is simply ignored now.
+    const [rows] = await db.query(
+      "SELECT * FROM content WHERE user_id = ? ORDER BY created_at DESC",
+      [getUserId(req)]
+    );
     await attachCategories(rows, "content_id");
     res.json(rows);
   })
@@ -307,10 +473,12 @@ app.get(
 
 app.get(
   "/content/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query("SELECT * FROM content WHERE content_id = ?", [
-      req.params.id,
-    ]);
+    const [rows] = await db.query(
+      "SELECT * FROM content WHERE content_id = ? AND user_id = ?",
+      [req.params.id, getUserId(req)]
+    );
     if (rows.length === 0) {
       return res.status(404).json({ message: "Content not found" });
     }
@@ -321,6 +489,7 @@ app.get(
 
 app.post(
   "/content",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { title, description, content_type, status, category_ids } = req.body || {};
 
@@ -333,7 +502,7 @@ app.post(
     const [result] = await db.query(
       `INSERT INTO content (user_id, title, description, content_type, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
-      [DEFAULT_USER_ID, title, description || null, content_type, status || "draft"]
+      [getUserId(req), title, description || null, content_type, status || "draft"]
     );
 
     await setContentCategories(result.insertId, category_ids);
@@ -348,13 +517,14 @@ app.post(
 
 app.put(
   "/content/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { title, description, content_type, status, category_ids } = req.body || {};
     const { id } = req.params;
 
     const [existing] = await db.query(
-      "SELECT * FROM content WHERE content_id = ?",
-      [id]
+      "SELECT * FROM content WHERE content_id = ? AND user_id = ?",
+      [id, getUserId(req)]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Content not found" });
@@ -383,11 +553,12 @@ app.put(
 
 app.delete(
   "/content/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     try {
       const [result] = await db.query(
-        "DELETE FROM content WHERE content_id = ?",
-        [req.params.id]
+        "DELETE FROM content WHERE content_id = ? AND user_id = ?",
+        [req.params.id, getUserId(req)]
       );
       if (result.affectedRows === 0) {
         return res.status(404).json({ message: "Content not found" });
@@ -422,11 +593,14 @@ const SCRIPT_SELECT = `
 
 app.get(
   "/scripts",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const params = [];
-    let sql = SCRIPT_SELECT;
+    // Scripts have no user_id of their own — ownership is always via the
+    // parent content row, so c.user_id = ? is the actual isolation check.
+    const params = [getUserId(req)];
+    let sql = `${SCRIPT_SELECT} WHERE c.user_id = ?`;
     if (req.query.content_id) {
-      sql += " WHERE s.content_id = ?";
+      sql += " AND s.content_id = ?";
       params.push(req.query.content_id);
     }
     sql += " ORDER BY s.created_at DESC";
@@ -438,10 +612,12 @@ app.get(
 
 app.get(
   "/scripts/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query(`${SCRIPT_SELECT} WHERE s.script_id = ?`, [
-      req.params.id,
-    ]);
+    const [rows] = await db.query(
+      `${SCRIPT_SELECT} WHERE s.script_id = ? AND c.user_id = ?`,
+      [req.params.id, getUserId(req)]
+    );
     if (rows.length === 0) {
       return res.status(404).json({ message: "Script not found" });
     }
@@ -457,6 +633,7 @@ app.get(
 // "create content" step.
 app.post(
   "/scripts",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const {
       title,
@@ -476,8 +653,8 @@ app.post(
 
     if (finalContentId) {
       const [contentRows] = await db.query(
-        "SELECT content_id FROM content WHERE content_id = ?",
-        [finalContentId]
+        "SELECT content_id FROM content WHERE content_id = ? AND user_id = ?",
+        [finalContentId, getUserId(req)]
       );
       if (contentRows.length === 0) {
         return res.status(400).json({ message: "content_id does not reference an existing content item" });
@@ -491,7 +668,7 @@ app.post(
       const [contentResult] = await db.query(
         `INSERT INTO content (user_id, title, description, content_type, status, created_at, updated_at)
          VALUES (?, ?, NULL, ?, 'draft', NOW(), NOW())`,
-        [DEFAULT_USER_ID, title, content_type]
+        [getUserId(req), title, content_type]
       );
       finalContentId = contentResult.insertId;
     }
@@ -514,13 +691,16 @@ app.post(
 
 app.put(
   "/scripts/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { title, script_content, notes, status, content_type, category_ids } = req.body || {};
 
     const [existing] = await db.query(
-      "SELECT * FROM scripts WHERE script_id = ?",
-      [id]
+      `SELECT s.* FROM scripts s
+       JOIN content c ON c.content_id = s.content_id
+       WHERE s.script_id = ? AND c.user_id = ?`,
+      [id, getUserId(req)]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Script not found" });
@@ -556,10 +736,14 @@ app.put(
 
 app.delete(
   "/scripts/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [result] = await db.query("DELETE FROM scripts WHERE script_id = ?", [
-      req.params.id,
-    ]);
+    const [result] = await db.query(
+      `DELETE s FROM scripts s
+       JOIN content c ON c.content_id = s.content_id
+       WHERE s.script_id = ? AND c.user_id = ?`,
+      [req.params.id, getUserId(req)]
+    );
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Script not found" });
     }
@@ -591,19 +775,27 @@ const SCHEDULED_SELECT = `
 
 app.get(
   "/scheduled-content",
+  requireAuth,
   asyncHandler(async (req, res) => {
     await updateMissedScheduledContent();
-    const [rows] = await db.query(`${SCHEDULED_SELECT} ORDER BY sc.scheduled_date ASC`);
+    // scheduled_content has no user_id of its own — ownership is always
+    // via the parent content row (c.user_id).
+    const [rows] = await db.query(
+      `${SCHEDULED_SELECT} WHERE c.user_id = ? ORDER BY sc.scheduled_date ASC`,
+      [getUserId(req)]
+    );
     res.json(rows);
   })
 );
 
 app.get(
   "/scheduled-content/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query(`${SCHEDULED_SELECT} WHERE sc.schedule_id = ?`, [
-      req.params.id,
-    ]);
+    const [rows] = await db.query(
+      `${SCHEDULED_SELECT} WHERE sc.schedule_id = ? AND c.user_id = ?`,
+      [req.params.id, getUserId(req)]
+    );
     if (rows.length === 0) {
       return res.status(404).json({ message: "Scheduled item not found" });
     }
@@ -617,6 +809,7 @@ app.get(
 // content on one date) and inserts one scheduled_content row per platform.
 app.post(
   "/scheduled-content",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { content_id, platform_id, platform_ids, scheduled_date, status } =
       req.body || {};
@@ -638,8 +831,8 @@ app.post(
     }
 
     const [contentRows] = await db.query(
-      "SELECT content_id FROM content WHERE content_id = ?",
-      [content_id]
+      "SELECT content_id FROM content WHERE content_id = ? AND user_id = ?",
+      [content_id, getUserId(req)]
     );
     if (contentRows.length === 0) {
       return res.status(400).json({ message: "content_id does not reference an existing content item" });
@@ -679,14 +872,17 @@ app.post(
 
 app.put(
   "/scheduled-content/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { scheduled_date, platform_id, status, published_at, external_content_url } =
       req.body || {};
 
     const [existing] = await db.query(
-      "SELECT * FROM scheduled_content WHERE schedule_id = ?",
-      [id]
+      `SELECT sc.* FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
+       WHERE sc.schedule_id = ? AND c.user_id = ?`,
+      [id, getUserId(req)]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Scheduled item not found" });
@@ -739,7 +935,7 @@ app.put(
         // for PART 4 analytics scoping. Use those two routes instead of a
         // pasted URL when the video's real channel ownership matters.
         finalYoutubeChannelId = scopingColumnAvailable
-          ? await getConnectedYoutubeChannelId()
+          ? await getConnectedYoutubeChannelId(getUserId(req))
           : null;
       }
     }
@@ -781,11 +977,14 @@ app.put(
 // Convenience endpoint for the "mark as published" test step.
 app.patch(
   "/scheduled-content/:id/publish",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const [existing] = await db.query(
-      "SELECT * FROM scheduled_content WHERE schedule_id = ?",
-      [id]
+      `SELECT sc.* FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
+       WHERE sc.schedule_id = ? AND c.user_id = ?`,
+      [id, getUserId(req)]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Scheduled item not found" });
@@ -811,11 +1010,14 @@ app.patch(
 // scheduled_content status vocabulary.
 app.patch(
   "/scheduled-content/:id/unpublish",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const [existing] = await db.query(
-      "SELECT * FROM scheduled_content WHERE schedule_id = ?",
-      [id]
+      `SELECT sc.* FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
+       WHERE sc.schedule_id = ? AND c.user_id = ?`,
+      [id, getUserId(req)]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Scheduled item not found" });
@@ -845,15 +1047,15 @@ app.patch(
 // that might be wrong.
 // =======================================================================
 
-async function getScheduleForYoutubeMatch(scheduleId) {
+async function getScheduleForYoutubeMatch(scheduleId, userId) {
   const [rows] = await db.query(
     `SELECT sc.schedule_id, sc.content_id, sc.platform_id, sc.external_content_id,
             c.title AS content_title, p.platform_name
      FROM scheduled_content sc
      JOIN content c ON c.content_id = sc.content_id
      JOIN platforms p ON p.platform_id = sc.platform_id
-     WHERE sc.schedule_id = ?`,
-    [scheduleId]
+     WHERE sc.schedule_id = ? AND c.user_id = ?`,
+    [scheduleId, userId]
   );
   return rows[0] || null;
 }
@@ -898,10 +1100,11 @@ async function linkYoutubeVideo(scheduleId, videoId, channelId) {
 // shown, this route doesn't need to know why it was called.
 app.post(
   "/scheduled-content/:id/find-youtube-video",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
 
-    const schedule = await getScheduleForYoutubeMatch(id);
+    const schedule = await getScheduleForYoutubeMatch(id, getUserId(req));
     if (!schedule) {
       return res.status(404).json({ message: "Scheduled item not found" });
     }
@@ -913,7 +1116,7 @@ app.post(
 
     const [userRows] = await db.query(
       "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 5",
-      [DEFAULT_USER_ID]
+      [getUserId(req)]
     );
     const channelId = userRows[0] && userRows[0].youtube_channel_id;
     if (!channelId) {
@@ -957,6 +1160,7 @@ app.post(
 // already used for URL-derived IDs elsewhere in this file.
 app.post(
   "/scheduled-content/:id/select-youtube-video",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { video_id: videoId } = req.body || {};
@@ -965,7 +1169,7 @@ app.post(
       return res.status(400).json({ message: "video_id is required" });
     }
 
-    const schedule = await getScheduleForYoutubeMatch(id);
+    const schedule = await getScheduleForYoutubeMatch(id, getUserId(req));
     if (!schedule) {
       return res.status(404).json({ message: "Scheduled item not found" });
     }
@@ -977,7 +1181,7 @@ app.post(
 
     const [userRows] = await db.query(
       "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 5",
-      [DEFAULT_USER_ID]
+      [getUserId(req)]
     );
     const channelId = userRows[0] && userRows[0].youtube_channel_id;
     if (!channelId) {
@@ -1010,10 +1214,13 @@ app.post(
 
 app.delete(
   "/scheduled-content/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [result] = await db.query(
-      "DELETE FROM scheduled_content WHERE schedule_id = ?",
-      [req.params.id]
+      `DELETE sc FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
+       WHERE sc.schedule_id = ? AND c.user_id = ?`,
+      [req.params.id, getUserId(req)]
     );
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Scheduled item not found" });
@@ -1072,18 +1279,26 @@ function validateMetricCounts(body, { requireAll }) {
 
 app.get(
   "/performance-metrics",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query(`${PERFORMANCE_SELECT} ORDER BY pm.recorded_at DESC`);
+    // performance_metrics has no user_id of its own — ownership is via
+    // the parent content row (c.user_id), same as scripts/scheduled-content.
+    const [rows] = await db.query(
+      `${PERFORMANCE_SELECT} WHERE c.user_id = ? ORDER BY pm.recorded_at DESC`,
+      [getUserId(req)]
+    );
     res.json(castNumbersAll(rows, ["engagement_rate"]));
   })
 );
 
 app.get(
   "/performance-metrics/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query(`${PERFORMANCE_SELECT} WHERE pm.metric_id = ?`, [
-      req.params.id,
-    ]);
+    const [rows] = await db.query(
+      `${PERFORMANCE_SELECT} WHERE pm.metric_id = ? AND c.user_id = ?`,
+      [req.params.id, getUserId(req)]
+    );
     if (rows.length === 0) {
       return res.status(404).json({ message: "Performance metric not found" });
     }
@@ -1093,6 +1308,7 @@ app.get(
 
 app.post(
   "/performance-metrics",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { content_id, platform_id, recorded_at } = req.body || {};
 
@@ -1106,8 +1322,8 @@ app.post(
     }
 
     const [contentRows] = await db.query(
-      "SELECT content_id FROM content WHERE content_id = ?",
-      [content_id]
+      "SELECT content_id FROM content WHERE content_id = ? AND user_id = ?",
+      [content_id, getUserId(req)]
     );
     if (contentRows.length === 0) {
       return res.status(400).json({ message: "content_id does not reference an existing content item" });
@@ -1136,12 +1352,15 @@ app.post(
 
 app.put(
   "/performance-metrics/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
 
     const [existing] = await db.query(
-      "SELECT * FROM performance_metrics WHERE metric_id = ?",
-      [id]
+      `SELECT pm.* FROM performance_metrics pm
+       JOIN content c ON c.content_id = pm.content_id
+       WHERE pm.metric_id = ? AND c.user_id = ?`,
+      [id, getUserId(req)]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Performance metric not found" });
@@ -1172,10 +1391,13 @@ app.put(
 
 app.delete(
   "/performance-metrics/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [result] = await db.query(
-      "DELETE FROM performance_metrics WHERE metric_id = ?",
-      [req.params.id]
+      `DELETE pm FROM performance_metrics pm
+       JOIN content c ON c.content_id = pm.content_id
+       WHERE pm.metric_id = ? AND c.user_id = ?`,
+      [req.params.id, getUserId(req)]
     );
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Performance metric not found" });
@@ -1194,14 +1416,29 @@ app.delete(
 // thing: identifying the authenticated user's own channel right after
 // they authorise the app. No OAuth token is ever stored or sent to the
 // frontend; only the resulting channel ID is persisted, in the existing
-// users.youtube_channel_id column, for DEFAULT_USER_ID (see note above).
+// users.youtube_channel_id column, for whichever creator is logged in.
 // =======================================================================
 
-app.get("/auth/youtube", (req, res, next) => {
+// requireAuth here means: you must be logged into the app itself before
+// you can start the "connect my YouTube channel" OAuth round-trip. This
+// app-login session (req.session.userId) lives in the same cookie/session
+// object Passport uses, but under a different key — passport.authenticate
+// and the later req.logout() call below only ever touch their own
+// req.session.passport key, so req.session.userId survives the whole
+// round-trip untouched. That's what lets the callback route below know
+// *which* creator's users row to update.
+app.get("/auth/youtube", requireAuth, (req, res, next) => {
   if (!isGoogleOAuthConfigured) {
     return res.redirect(`${FRONTEND_URL}/analytics.html?youtube=config_missing`);
   }
-  passport.authenticate("google", {
+
+  // Keep the application user's identity separate from Passport's temporary
+  // Google identity. The callback must always update the creator who clicked
+  // "Connect YouTube", never whichever Google profile Passport last loaded.
+  req.session.youtubeOAuthUserId = getUserId(req);
+  req.session.save((saveError) => {
+    if (saveError) return next(saveError);
+    passport.authenticate("google", {
     // profile: minimal identification of the Google account itself.
     // youtube.readonly: the narrowest scope that allows looking up
     // which channel belongs to this account (channels.list?mine=true).
@@ -1209,11 +1446,13 @@ app.get("/auth/youtube", (req, res, next) => {
     // requested, since nothing in this task writes to YouTube.
     scope: ["profile", "https://www.googleapis.com/auth/youtube.readonly"],
     prompt: "select_account",
-  })(req, res, next);
+    })(req, res, next);
+  });
 });
 
 app.get(
   "/auth/youtube/callback",
+  requireAuth,
   (req, res, next) => {
     if (!isGoogleOAuthConfigured) {
       return res.redirect(`${FRONTEND_URL}/analytics.html?youtube=config_missing`);
@@ -1225,12 +1464,9 @@ app.get(
   },
   asyncHandler(async (req, res) => {
     const accessToken = req.user && req.user.accessToken;
+    const userId = Number(req.session && req.session.youtubeOAuthUserId);
 
-    // The OAuth token was only ever needed for the lookup below — clear
-    // it out of the session now rather than leaving it sitting around.
-    req.logout(() => {});
-
-    if (!accessToken) {
+    if (!accessToken || !Number.isInteger(userId) || userId <= 0) {
       return res.redirect(`${FRONTEND_URL}/analytics.html?youtube=error`);
     }
 
@@ -1239,27 +1475,34 @@ app.get(
       channelId = await youtubeService.getMyChannelId(accessToken);
     } catch (error) {
       console.error("YouTube channel lookup failed:", error.message);
+      req.session.youtubeOAuthUserId = null;
+      req.logout(() => {});
       return res.redirect(`${FRONTEND_URL}/analytics.html?youtube=error`);
     }
 
     await db.query("UPDATE users SET youtube_channel_id = ? WHERE user_id = ?", [
       channelId,
-      DEFAULT_USER_ID,
+      userId,
     ]);
+
+    // OAuth is complete. Clear Passport's temporary Google identity and the
+    // one-use application-user marker, but keep req.session.userId intact.
+    req.session.youtubeOAuthUserId = null;
+    req.logout(() => {});
 
     res.redirect(`${FRONTEND_URL}/analytics.html?youtube=connected`);
   })
 );
 
 // Lets the frontend ask "is YouTube connected?" without ever seeing a
-// token — this is a plain DB read keyed on DEFAULT_USER_ID, the same
-// single-creator assumption used everywhere else in this file.
+// token — scoped to whichever creator is currently logged in.
 app.get(
   "/youtube/connection-status",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [rows] = await db.query(
       "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 5",
-      [DEFAULT_USER_ID]
+      [getUserId(req)]
     );
 
     const channelId = rows[0] && rows[0].youtube_channel_id;
@@ -1281,6 +1524,7 @@ app.get(
 
 app.post(
   "/performance-metrics/sync/:scheduleId",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { scheduleId } = req.params;
 
@@ -1288,9 +1532,10 @@ app.post(
       `SELECT sc.schedule_id, sc.content_id, sc.platform_id,
               sc.external_content_id, p.platform_name
        FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
        JOIN platforms p ON p.platform_id = sc.platform_id
-       WHERE sc.schedule_id = ?`,
-      [scheduleId]
+       WHERE sc.schedule_id = ? AND c.user_id = ?`,
+      [scheduleId, getUserId(req)]
     );
 
     if (scheduleRows.length === 0) {
@@ -1364,18 +1609,22 @@ app.post(
 
 app.post(
   "/api/analytics/youtube/subscribers/sync",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [userRows] = await db.query(
       `SELECT user_id, youtube_channel_id
        FROM users
        WHERE user_id = ?
        LIMIT 5`,
-      [DEFAULT_USER_ID]
+      [getUserId(req)]
     );
 
     if (userRows.length === 0) {
+      // Can't normally happen once logged in (the session's user_id came
+      // from this same table), but handled defensively in case the row
+      // was deleted directly in the DB after login.
       return res.status(404).json({
-        message: "Default creator/user was not found.",
+        message: "Your user account was not found.",
         code: "USER_NOT_FOUND",
       });
     }
@@ -1492,15 +1741,16 @@ app.post(
 
 app.get(
   "/api/analytics/followers",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [userRows] = await db.query(
       `SELECT user_id, youtube_channel_id FROM users WHERE user_id = ? LIMIT 1`,
-      [DEFAULT_USER_ID]
+      [getUserId(req)]
     );
 
     if (userRows.length === 0) {
       return res.status(404).json({
-        message: "Default creator/user was not found.",
+        message: "Your user account was not found.",
         code: "USER_NOT_FOUND",
       });
     }
@@ -1543,7 +1793,7 @@ app.get(
          AND platform_id = ?
          AND channel_id = ?
        ORDER BY recorded_at ASC`,
-      [DEFAULT_USER_ID, platformRows[0].platform_id, user.youtube_channel_id]
+      [getUserId(req), platformRows[0].platform_id, user.youtube_channel_id]
     );
 
     const history = rows.map((row) => ({
@@ -1591,6 +1841,7 @@ app.get(
 // it stays tagged to whichever channel_id it was actually recorded under.
 app.post(
   "/api/youtube/channel",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const rawChannelId = (req.body || {}).channel_id;
     const channelId = typeof rawChannelId === "string" ? rawChannelId.trim() : "";
@@ -1621,7 +1872,7 @@ app.post(
 
     await db.query(
       `UPDATE users SET youtube_channel_id = ? WHERE user_id = ?`,
-      [info.channelId, DEFAULT_USER_ID]
+      [info.channelId, getUserId(req)]
     );
 
     res.json({
@@ -1638,10 +1889,11 @@ app.post(
 // performance_metrics history.
 app.delete(
   "/api/youtube/channel",
+  requireAuth,
   asyncHandler(async (req, res) => {
     await db.query(
       `UPDATE users SET youtube_channel_id = NULL WHERE user_id = ?`,
-      [DEFAULT_USER_ID]
+      [getUserId(req)]
     );
 
     res.json({
@@ -1659,10 +1911,11 @@ app.delete(
 
 app.get(
   "/api/youtube/connection",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [userRows] = await db.query(
       `SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 1`,
-      [DEFAULT_USER_ID]
+      [getUserId(req)]
     );
 
     if (userRows.length === 0 || !userRows[0].youtube_channel_id) {
@@ -1701,11 +1954,16 @@ app.get(
 
 app.get(
   "/analytics/summary",
+  requireAuth,
   asyncHandler(async (req, res) => {
     // PART 4: only ever total up YouTube metrics recorded under the
     // currently connected channel — see YT_CHANNEL_SCOPE_SQL above.
+    // PHASE 1: also scope to the logged-in user's own content — this
+    // query previously had no content/user join at all and summed every
+    // user's performance_metrics together.
+    const userId = getUserId(req);
     const scoped = await hasChannelScopingColumn();
-    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId(userId) : null;
 
     const [rows] = await db.query(
       `
@@ -1718,10 +1976,12 @@ app.get(
           CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
         ), 2), 0) AS average_engagement_rate
       FROM performance_metrics pm
+      JOIN content c ON c.content_id = pm.content_id
       JOIN platforms p ON p.platform_id = pm.platform_id
-      ${scoped ? `WHERE ${YT_CHANNEL_SCOPE_SQL}` : ""}
+      WHERE c.user_id = ?
+      ${scoped ? `AND ${YT_CHANNEL_SCOPE_SQL}` : ""}
       `,
-      scoped ? [currentChannelId] : []
+      scoped ? [userId, currentChannelId] : [userId]
     );
     res.json(castNumbers(rows[0], ["total_views", "total_likes", "total_comments", "total_shares", "average_engagement_rate"]));
   })
@@ -1729,13 +1989,15 @@ app.get(
 
 app.get(
   "/analytics/top-content",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 5, 50);
+    const userId = getUserId(req);
 
     // PART 4: exclude YouTube metrics linked under a channel that isn't
     // the one currently connected — see YT_CHANNEL_SCOPE_SQL above.
     const scoped = await hasChannelScopingColumn();
-    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId(userId) : null;
 
     const [rows] = await db.query(
       `
@@ -1749,11 +2011,12 @@ app.get(
       FROM performance_metrics pm
       JOIN content c ON c.content_id = pm.content_id
       JOIN platforms p ON p.platform_id = pm.platform_id
-      ${scoped ? `WHERE ${YT_CHANNEL_SCOPE_SQL}` : ""}
+      WHERE c.user_id = ?
+      ${scoped ? `AND ${YT_CHANNEL_SCOPE_SQL}` : ""}
       ORDER BY engagement_rate DESC
       LIMIT ?
       `,
-      scoped ? [currentChannelId, limit] : [limit]
+      scoped ? [userId, currentChannelId, limit] : [userId, limit]
     );
     res.json(castNumbersAll(rows, ["views", "likes", "comments", "shares", "engagement_rate"]));
   })
@@ -1761,6 +2024,7 @@ app.get(
 
 app.get(
   "/analytics/platform-performance",
+  requireAuth,
   asyncHandler(async (req, res) => {
     // PART 4: the join condition (not a WHERE clause) is what has to
     // carry the channel scope here — this query LEFT JOINs FROM
@@ -1768,8 +2032,14 @@ app.get(
     // putting the filter in WHERE instead would turn that LEFT JOIN
     // back into an effective INNER JOIN and drop platforms with no
     // *currently-scoped* data instead of just zeroing their totals.
+    // PHASE 1: the user filter has to live in the same ON clause for the
+    // same reason — pm.content_id IN (creator's own content) narrows
+    // which performance_metrics rows can match, without ever turning
+    // this into an INNER JOIN that would drop platforms with zero of
+    // *this* user's data.
+    const userId = getUserId(req);
     const scoped = await hasChannelScopingColumn();
-    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId(userId) : null;
 
     const [rows] = await db.query(
       `
@@ -1785,11 +2055,12 @@ app.get(
       FROM platforms p
       LEFT JOIN performance_metrics pm
         ON pm.platform_id = p.platform_id
+        AND pm.content_id IN (SELECT content_id FROM content WHERE user_id = ?)
         ${scoped ? `AND ${YT_CHANNEL_SCOPE_SQL}` : ""}
       GROUP BY p.platform_id, p.platform_name
       ORDER BY p.platform_name
       `,
-      scoped ? [currentChannelId] : []
+      scoped ? [userId, currentChannelId] : [userId]
     );
     res.json(castNumbersAll(rows, ["total_views", "total_likes", "total_comments", "total_shares", "average_engagement_rate"]));
   })
@@ -1797,12 +2068,14 @@ app.get(
 
 app.get(
   "/analytics/performance-over-time",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    // PART 4/6: same channel scoping as the other analytics endpoints —
-    // needs a platforms join (this query previously had none) purely to
-    // evaluate that condition.
+    // PART 4/6: same channel scoping as the other analytics endpoints.
+    // PHASE 1: also joins content now, purely to scope to the logged-in
+    // user's own performance_metrics rows.
+    const userId = getUserId(req);
     const scoped = await hasChannelScopingColumn();
-    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId(userId) : null;
 
     const [rows] = await db.query(
       `
@@ -1813,12 +2086,14 @@ app.get(
         COALESCE(SUM(pm.comments), 0) AS comments,
         COALESCE(SUM(pm.shares), 0) AS shares
       FROM performance_metrics pm
+      JOIN content c ON c.content_id = pm.content_id
       JOIN platforms p ON p.platform_id = pm.platform_id
-      ${scoped ? `WHERE ${YT_CHANNEL_SCOPE_SQL}` : ""}
+      WHERE c.user_id = ?
+      ${scoped ? `AND ${YT_CHANNEL_SCOPE_SQL}` : ""}
       GROUP BY DATE(pm.recorded_at)
       ORDER BY date ASC
       `,
-      scoped ? [currentChannelId] : []
+      scoped ? [userId, currentChannelId] : [userId]
     );
     res.json(castNumbersAll(rows, ["views", "likes", "comments", "shares"]));
   })
@@ -1842,22 +2117,25 @@ app.get(
 // implementation of the consistency formula, not two. Does NOT call
 // updateMissedScheduledContent() itself — callers run that first, same
 // as before.
-async function computeOverallConsistency({ start, end } = {}) {
-  const params = [];
+async function computeOverallConsistency(userId, { start, end } = {}) {
+  // scheduled_content has no user_id of its own — ownership is always via
+  // the parent content row, same as everywhere else in this file.
+  const params = [userId];
   let sql = `
-    SELECT status, COUNT(*) AS count
-    FROM scheduled_content
-    WHERE status IN ('Published', 'Missed')
+    SELECT sc.status, COUNT(*) AS count
+    FROM scheduled_content sc
+    JOIN content c ON c.content_id = sc.content_id
+    WHERE c.user_id = ? AND sc.status IN ('Published', 'Missed')
   `;
   if (start) {
-    sql += " AND scheduled_date >= ?";
+    sql += " AND sc.scheduled_date >= ?";
     params.push(start);
   }
   if (end) {
-    sql += " AND scheduled_date <= ?";
+    sql += " AND sc.scheduled_date <= ?";
     params.push(end);
   }
-  sql += " GROUP BY status";
+  sql += " GROUP BY sc.status";
 
   const [rows] = await db.query(sql, params);
 
@@ -1879,29 +2157,35 @@ async function computeOverallConsistency({ start, end } = {}) {
 
 app.get(
   "/analytics/consistency",
+  requireAuth,
   asyncHandler(async (req, res) => {
     await updateMissedScheduledContent();
-    const result = await computeOverallConsistency(req.query);
+    const result = await computeOverallConsistency(getUserId(req), req.query);
     res.json(result);
   })
 );
 
 app.get(
   "/analytics/consistency/by-platform",
+  requireAuth,
   asyncHandler(async (req, res) => {
     await updateMissedScheduledContent();
 
-    const [rows] = await db.query(`
+    const [rows] = await db.query(
+      `
       SELECT
         p.platform_id, p.platform_name,
         SUM(CASE WHEN sc.status = 'Published' THEN 1 ELSE 0 END) AS publishedCount,
         SUM(CASE WHEN sc.status = 'Missed' THEN 1 ELSE 0 END) AS missedCount
       FROM scheduled_content sc
+      JOIN content c ON c.content_id = sc.content_id
       JOIN platforms p ON p.platform_id = sc.platform_id
-      WHERE sc.status IN ('Published', 'Missed')
+      WHERE c.user_id = ? AND sc.status IN ('Published', 'Missed')
       GROUP BY p.platform_id, p.platform_name
       ORDER BY p.platform_name
-    `);
+      `,
+      [getUserId(req)]
+    );
 
     const result = rows.map((row) => {
       const publishedCount = Number(row.publishedCount);
@@ -1922,6 +2206,7 @@ app.get(
 
 app.get(
   "/analytics/consistency/trend",
+  requireAuth,
   asyncHandler(async (req, res) => {
     await updateMissedScheduledContent();
 
@@ -1929,20 +2214,24 @@ app.get(
     const groupBy = req.query.groupBy === "week" ? "week" : "month";
     const periodExpr =
       groupBy === "week"
-        ? "YEARWEEK(scheduled_date, 3)" // ISO-8601 week
-        : "DATE_FORMAT(scheduled_date, '%Y-%m')";
+        ? "YEARWEEK(sc.scheduled_date, 3)" // ISO-8601 week
+        : "DATE_FORMAT(sc.scheduled_date, '%Y-%m')";
 
-    const [rows] = await db.query(`
+    const [rows] = await db.query(
+      `
       SELECT
         ${periodExpr} AS period_key,
-        MIN(scheduled_date) AS period_start,
-        SUM(CASE WHEN status = 'Published' THEN 1 ELSE 0 END) AS publishedCount,
-        SUM(CASE WHEN status = 'Missed' THEN 1 ELSE 0 END) AS missedCount
-      FROM scheduled_content
-      WHERE status IN ('Published', 'Missed')
+        MIN(sc.scheduled_date) AS period_start,
+        SUM(CASE WHEN sc.status = 'Published' THEN 1 ELSE 0 END) AS publishedCount,
+        SUM(CASE WHEN sc.status = 'Missed' THEN 1 ELSE 0 END) AS missedCount
+      FROM scheduled_content sc
+      JOIN content c ON c.content_id = sc.content_id
+      WHERE c.user_id = ? AND sc.status IN ('Published', 'Missed')
       GROUP BY period_key
       ORDER BY period_key ASC
-    `);
+      `,
+      [getUserId(req)]
+    );
 
     const result = rows.map((row) => {
       const publishedCount = Number(row.publishedCount);
@@ -1972,8 +2261,8 @@ app.get(
 //
 // One endpoint that gives the dashboard everything it needs in a single
 // request, instead of the frontend firing off five separate calls. It
-// only reads existing tables via existing patterns (DEFAULT_USER_ID,
-// updateMissedScheduledContent, the youtube_channel_id/follower_metrics
+// only reads existing tables via existing patterns (the logged-in user's
+// id, updateMissedScheduledContent, the youtube_channel_id/follower_metrics
 // pair, performance_metrics) — nothing new is written here.
 //
 // STATUS NOTE: content.status is not a reliable "is this draft/scheduled/
@@ -1993,11 +2282,14 @@ app.get(
 
 app.get(
   "/dashboard/summary",
+  requireAuth,
   asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
     await updateMissedScheduledContent();
 
     // ---- Content summary (single query, EXISTS-based per the note above) ----
-    const [[contentSummaryRow]] = await db.query(`
+    const [[contentSummaryRow]] = await db.query(
+      `
       SELECT
         COUNT(*) AS total,
         SUM(CASE
@@ -2017,7 +2309,10 @@ app.get(
               ) THEN 1 ELSE 0
             END) AS scheduled
       FROM content c
-    `);
+      WHERE c.user_id = ?
+      `,
+      [userId]
+    );
 
     const total = Number(contentSummaryRow.total) || 0;
     const published = Number(contentSummaryRow.published) || 0;
@@ -2030,7 +2325,8 @@ app.get(
     // ungrouped here — LIMIT is applied after grouping below, otherwise
     // "5 rows" could all be the same content item on 5 platforms while a
     // genuinely different upcoming item never appears.
-    const [upcomingRawRows] = await db.query(`
+    const [upcomingRawRows] = await db.query(
+      `
       SELECT
         sc.content_id, sc.scheduled_date,
         c.title AS content_title, c.content_type,
@@ -2038,9 +2334,11 @@ app.get(
       FROM scheduled_content sc
       JOIN content c ON c.content_id = sc.content_id
       JOIN platforms p ON p.platform_id = sc.platform_id
-      WHERE sc.status = 'Scheduled' AND sc.scheduled_date >= NOW()
+      WHERE c.user_id = ? AND sc.status = 'Scheduled' AND sc.scheduled_date >= NOW()
       ORDER BY sc.scheduled_date ASC
-    `);
+      `,
+      [userId]
+    );
 
     const upcomingGroupsById = new Map();
     for (const row of upcomingRawRows) {
@@ -2084,7 +2382,7 @@ app.get(
     // ---- Platform overview ----
     const [userRows] = await db.query(
       "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 5",
-      [DEFAULT_USER_ID]
+      [userId]
     );
     const youtubeChannelId = userRows[0] && userRows[0].youtube_channel_id;
 
@@ -2098,7 +2396,7 @@ app.get(
           `SELECT follower_count FROM follower_metrics
            WHERE user_id = ? AND platform_id = ?
            ORDER BY recorded_at DESC LIMIT 5`,
-          [DEFAULT_USER_ID, ytPlatformRows[0].platform_id]
+          [userId, ytPlatformRows[0].platform_id]
         );
         if (latestFollowerRows.length > 0) {
           youtubeSubscriberCount = Number(latestFollowerRows[0].follower_count);
@@ -2122,52 +2420,80 @@ app.get(
     // PART 4: applies the same current-channel scoping as the Analytics
     // page (see YT_CHANNEL_SCOPE_SQL above) so this card can never show a
     // previously-connected channel's metrics as if they were current.
+    // PHASE 1: PERFORMANCE_SELECT already joins content — c.user_id = ?
+    // scopes this to the logged-in user's own metrics.
     const scopedForSnapshot = await hasChannelScopingColumn();
     const snapshotChannelId = scopedForSnapshot ? youtubeChannelId : null;
     const [latestPerfRows] = await db.query(
-      `${PERFORMANCE_SELECT} ${scopedForSnapshot ? `WHERE ${YT_CHANNEL_SCOPE_SQL}` : ""}
+      `${PERFORMANCE_SELECT} WHERE c.user_id = ?
+       ${scopedForSnapshot ? `AND ${YT_CHANNEL_SCOPE_SQL}` : ""}
        ORDER BY pm.recorded_at DESC LIMIT 5`,
-      scopedForSnapshot ? [snapshotChannelId] : []
+      scopedForSnapshot ? [userId, snapshotChannelId] : [userId]
     );
     const latestPerformance = latestPerfRows.length > 0
       ? castNumbers(latestPerfRows[0], ["views", "likes", "comments", "shares", "engagement_rate"])
       : null;
 
-    // ---- Missed opportunities (top 5 active, highest score first) ----
-    // Reuses the same detection pass GET /opportunities runs — calling it
-    // here too keeps the dashboard's snapshot fresh without a second,
-    // competing detection implementation. detectMissedOpportunities() and
-    // generateRecommendations() are declared with `function` further down
-    // this file, so they are hoisted and safe to call from this earlier
-    // handler.
-    await detectMissedOpportunities();
-    const [topOpportunityRows] = await db.query(
-      `SELECT * FROM opportunities WHERE user_id = ? AND status = 'Active'
-       ORDER BY opportunity_score DESC, detected_at DESC LIMIT 5`,
-      [DEFAULT_USER_ID]
-    );
-    const topOpportunities = castNumbersAll(topOpportunityRows, [
-      "relevance_score",
-      "competitor_activity_score",
-      "engagement_score",
-      "timeliness_score",
-      "opportunity_score",
-    ]);
+        // ---- Optional sections: opportunities and recommendations ----
+    // A failure in either is logged on the server and reported to the
+    // frontend in sectionErrors. It never takes down the core dashboard
+    // data above, and no placeholder rows are invented: the affected list
+    // comes back empty and the frontend is told why.
+    const sectionErrors = {};
 
-    // ---- Recommendations (top 5 active, most recent first) ----
-    await generateRecommendations();
-    const [topRecommendations] = await db.query(
-      `SELECT * FROM recommendations WHERE user_id = ? AND status = 'Active'
-       ORDER BY created_at DESC LIMIT 5`,
-      [DEFAULT_USER_ID]
-    );
+    // ---- Opportunities (top 5 active, newest detection first) ----
+    let topOpportunities = [];
+    try {
+      try {
+        await detectOpportunities(userId);
+      } catch (error) {
+        console.error("Dashboard: opportunity detection failed:", error);
+        sectionErrors.opportunities =
+          "Opportunities could not be refreshed. The list below may be incomplete.";
+      }
+      const [topOpportunityRows] = await db.query(
+        `SELECT ${opportunityColumns()}
+           FROM opportunities
+          WHERE user_id = ? AND status = 'Active'
+          ORDER BY detected_at DESC
+          LIMIT 5`,
+        [userId]
+      );
+      topOpportunities = topOpportunityRows;
+    } catch (error) {
+      console.error("Dashboard: loading opportunities failed:", error);
+      sectionErrors.opportunities = "Opportunities could not be loaded.";
+    }
+
+    // ---- Recommendations (top 5 active, display order) ----
+    let topRecommendations = [];
+    try {
+      try {
+        await generateRecommendations(userId);
+      } catch (error) {
+        console.error("Dashboard: recommendation generation failed:", error);
+        sectionErrors.recommendations =
+          "Recommendations could not be refreshed. The list below may be incomplete.";
+      }
+      const [topRecommendationRows] = await db.query(
+        `SELECT ${recommendationColumns()} FROM recommendations
+          WHERE user_id = ? AND status = 'Active'
+          ORDER BY ${recommendationOrderSql()} LIMIT 5`,
+        [userId]
+      );
+      topRecommendations = topRecommendationRows;
+    } catch (error) {
+      console.error("Dashboard: loading recommendations failed:", error);
+      sectionErrors.recommendations = "Recommendations could not be loaded.";
+    }
 
     // ---- Competitors tracked (count only — full list lives on demand
     // via GET /competitors, called from the dashboard's "add competitor"
     // panel) ----
+    
     const [[competitorCountRow]] = await db.query(
       "SELECT COUNT(*) AS count FROM competitors WHERE user_id = ?",
-      [DEFAULT_USER_ID]
+      [userId]
     );
 
     res.json({
@@ -2175,8 +2501,9 @@ app.get(
       upcomingContent,
       platforms,
       latestPerformance,
-      opportunities: topOpportunities,
+            opportunities: topOpportunities,
       recommendations: topRecommendations,
+      sectionErrors,
       competitorsTracked: Number(competitorCountRow.count) || 0,
     });
   })
@@ -2201,8 +2528,9 @@ const COMPETITOR_SELECT = `
 
 app.get(
   "/competitors",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const params = [DEFAULT_USER_ID];
+    const params = [getUserId(req)];
     let sql = `${COMPETITOR_SELECT} WHERE co.user_id = ?`;
     if (req.query.platform_id) {
       sql += " AND co.platform_id = ?";
@@ -2216,10 +2544,11 @@ app.get(
 
 app.get(
   "/competitors/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [rows] = await db.query(
-      `${COMPETITOR_SELECT} WHERE co.competitor_id = ?`,
-      [req.params.id]
+      `${COMPETITOR_SELECT} WHERE co.competitor_id = ? AND co.user_id = ?`,
+      [req.params.id, getUserId(req)]
     );
     if (rows.length === 0) {
       return res.status(404).json({ message: "Competitor not found" });
@@ -2230,6 +2559,7 @@ app.get(
 
 app.post(
   "/competitors",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { name, platform_id, profile_url, category } = req.body || {};
     if (!name || !platform_id) {
@@ -2239,7 +2569,7 @@ app.post(
       const [result] = await db.query(
         `INSERT INTO competitors (user_id, name, platform_id, profile_url, category, created_at)
          VALUES (?, ?, ?, ?, ?, NOW())`,
-        [DEFAULT_USER_ID, name, platform_id, profile_url || null, category || null]
+        [getUserId(req), name, platform_id, profile_url || null, category || null]
       );
       const [rows] = await db.query(
         `${COMPETITOR_SELECT} WHERE co.competitor_id = ?`,
@@ -2257,13 +2587,14 @@ app.post(
 
 app.put(
   "/competitors/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { name, platform_id, profile_url, category } = req.body || {};
     const { id } = req.params;
 
     const [existing] = await db.query(
-      "SELECT * FROM competitors WHERE competitor_id = ?",
-      [id]
+      "SELECT * FROM competitors WHERE competitor_id = ? AND user_id = ?",
+      [id, getUserId(req)]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Competitor not found" });
@@ -2296,11 +2627,12 @@ app.put(
 
 app.delete(
   "/competitors/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     // competitor_content rows cascade-delete automatically (FK ON DELETE CASCADE)
     const [result] = await db.query(
-      "DELETE FROM competitors WHERE competitor_id = ?",
-      [req.params.id]
+      "DELETE FROM competitors WHERE competitor_id = ? AND user_id = ?",
+      [req.params.id, getUserId(req)]
     );
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Competitor not found" });
@@ -2325,10 +2657,11 @@ const COMPETITOR_CONTENT_SELECT = `
 
 app.get(
   "/competitors/:id/content",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [competitor] = await db.query(
-      "SELECT competitor_id FROM competitors WHERE competitor_id = ?",
-      [req.params.id]
+      "SELECT competitor_id FROM competitors WHERE competitor_id = ? AND user_id = ?",
+      [req.params.id, getUserId(req)]
     );
     if (competitor.length === 0) {
       return res.status(404).json({ message: "Competitor not found" });
@@ -2353,14 +2686,15 @@ app.get(
 
 app.post(
   "/competitors/:id/content",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { title, topic, published_at, views, likes, comments, shares, source_url } =
       req.body || {};
     const competitorId = req.params.id;
 
     const [competitor] = await db.query(
-      "SELECT competitor_id FROM competitors WHERE competitor_id = ?",
-      [competitorId]
+      "SELECT competitor_id FROM competitors WHERE competitor_id = ? AND user_id = ?",
+      [competitorId, getUserId(req)]
     );
     if (competitor.length === 0) {
       return res.status(404).json({ message: "Competitor not found" });
@@ -2396,14 +2730,17 @@ app.post(
 
 app.put(
   "/competitor-content/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { title, topic, published_at, views, likes, comments, shares, source_url } =
       req.body || {};
     const { id } = req.params;
 
     const [existing] = await db.query(
-      "SELECT * FROM competitor_content WHERE competitor_content_id = ?",
-      [id]
+      `SELECT cc.* FROM competitor_content cc
+       JOIN competitors co ON co.competitor_id = cc.competitor_id
+       WHERE cc.competitor_content_id = ? AND co.user_id = ?`,
+      [id, getUserId(req)]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Competitor content not found" });
@@ -2433,10 +2770,13 @@ app.put(
 
 app.delete(
   "/competitor-content/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const [result] = await db.query(
-      "DELETE FROM competitor_content WHERE competitor_content_id = ?",
-      [req.params.id]
+      `DELETE cc FROM competitor_content cc
+       JOIN competitors co ON co.competitor_id = cc.competitor_id
+       WHERE cc.competitor_content_id = ? AND co.user_id = ?`,
+      [req.params.id, getUserId(req)]
     );
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Competitor content not found" });
@@ -2455,8 +2795,10 @@ app.delete(
 
 app.get(
   "/analytics/competitor-activity",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const days = Number(req.query.days) || 30;
+    const userId = getUserId(req);
 
     const [competitorRows] = await db.query(
       `
@@ -2476,17 +2818,18 @@ app.get(
       GROUP BY co.competitor_id, co.name, p.platform_name
       ORDER BY postCount DESC
       `,
-      [days, DEFAULT_USER_ID]
+      [days, userId]
     );
 
     const scoped = await hasChannelScopingColumn();
-    const currentChannelId = scoped ? await getConnectedYoutubeChannelId() : null;
+    const currentChannelId = scoped ? await getConnectedYoutubeChannelId(userId) : null;
 
     const [creatorPublishedRows] = await db.query(
       `SELECT COUNT(*) AS postCount
-       FROM scheduled_content
-       WHERE status = 'Published' AND published_at >= DATE_SUB(NOW(), INTERVAL ? DAY)`,
-      [days]
+       FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
+       WHERE c.user_id = ? AND sc.status = 'Published' AND sc.published_at >= DATE_SUB(NOW(), INTERVAL ? DAY)`,
+      [userId, days]
     );
 
     const [creatorEngagementRows] = await db.query(
@@ -2495,11 +2838,12 @@ app.get(
         CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
       ), 2), 0) AS averageEngagementRate
       FROM performance_metrics pm
+      JOIN content c ON c.content_id = pm.content_id
       JOIN platforms p ON p.platform_id = pm.platform_id
-      WHERE pm.recorded_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+      WHERE c.user_id = ? AND pm.recorded_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
         ${scoped ? `AND ${YT_CHANNEL_SCOPE_SQL}` : ""}
       `,
-      scoped ? [days, currentChannelId] : [days]
+      scoped ? [userId, days, currentChannelId] : [userId, days]
     );
 
     res.json({
@@ -2516,491 +2860,564 @@ app.get(
 );
 
 // =======================================================================
-// MISSED OPPORTUNITY DETECTION (rule-based — see backend/services/
-// opportunityEngine.js for the scoring formulas, which are pure
-// functions with no DB access so they can be unit-tested on their own).
+// CREATOR EVENTS
+// A creator event is a date that matters to the creator's content (a
+// holiday, a conference, a series launch). It is NOT a scheduled post:
+// scheduled posts live in scheduled_content and are managed on the
+// calendar. Events feed the opportunity engine (detectEventOpportunities
+// below) only when they match one of the creator's own topics.
 //
-// Topic source: competitor_content.topic (recorded in the COMPETITORS
-// section above). We deliberately do NOT use the `events` table here —
-// it has no data, no routes, and no UI, and building all of that just to
-// seed topics would duplicate what competitor_content already gives us
-// for real. `opportunities.event_id` stays nullable/unused for now.
-//
-// DATA -> ANALYSIS -> RULE -> RECOMMENDATION, applied here as:
-//   1. Group recent competitor_content by topic (DATA).
-//   2. Check the topic against categories the creator actually uses,
-//      and check whether the creator already published something
-//      matching it (ANALYSIS).
-//   3. Relevant + competitor activity + not covered => missed
-//      opportunity (RULE).
-//   4. Score + classify it (this section produces the opportunity;
-//      Phase 9 turns qualifying opportunities into a recommendation).
+// Ownership: every query is scoped by the signed-in user's id
+// (req.session.userId via getUserId); user_id is never read from the
+// request body, query string or URL.
 // =======================================================================
 
-// The creator's "defined content scope" = category names they have
-// actually attached to at least one piece of their own content. If they
-// haven't categorised anything yet, there is nothing to match relevance
-// against, so detection correctly finds zero opportunities rather than
-// guessing.
-async function getCreatorCategoryScope() {
-  const [rows] = await db.query(
-    `SELECT DISTINCT cat.category_name
-     FROM content_categories ccat
-     JOIN content c ON c.content_id = ccat.content_id
-     JOIN categories cat ON cat.category_id = ccat.category_id
-     WHERE c.user_id = ?`,
-    [DEFAULT_USER_ID]
-  );
-  return rows.map((r) => r.category_name);
+const EVENT_SELECT = `
+  SELECT event_id, title, description, event_date, source, relevance_keywords,
+         created_at,
+         CASE
+           WHEN event_date IS NULL THEN 'Undated'
+           WHEN event_date < CURDATE() THEN 'Past'
+           WHEN event_date = CURDATE() THEN 'Today'
+           ELSE 'Upcoming'
+         END AS timing
+    FROM events
+`;
+
+// Upcoming/today first (soonest first), then past events (most recent
+// first), then any legacy rows with no date.
+const EVENT_ORDER_SQL = `
+  ORDER BY
+    CASE
+      WHEN event_date IS NULL THEN 2
+      WHEN event_date < CURDATE() THEN 1
+      ELSE 0
+    END,
+    CASE
+      WHEN event_date IS NULL THEN 0
+      WHEN event_date < CURDATE() THEN DATEDIFF(CURDATE(), event_date)
+      ELSE DATEDIFF(event_date, CURDATE())
+    END,
+    event_id
+`;
+
+const EVENT_UPDATABLE_COLUMNS = ["title", "description", "event_date", "source", "relevance_keywords"];
+
+function parseEventId(value) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-// Relevance check for one candidate topic against the creator's scope.
-// Returns { relevant, categoryMatched } — categoryMatched drives which
-// of the two documented relevance tiers applies (see opportunityEngine).
-function checkTopicRelevance(topicLabel, competitorCategories, creatorCategories) {
-  const topicLower = String(topicLabel || "").toLowerCase();
-  const competitorCategoryList = String(competitorCategories || "")
-    .split(",")
-    .map((c) => c.trim().toLowerCase())
-    .filter(Boolean);
-
-  for (const creatorCategory of creatorCategories) {
-    const creatorCategoryLower = creatorCategory.toLowerCase();
-    if (competitorCategoryList.includes(creatorCategoryLower)) {
-      return { relevant: true, categoryMatched: true };
-    }
+// Same creator, same title (case-insensitive), same date = the same
+// event. Also stops an accidental double-click from saving it twice.
+async function eventAlreadyExists(userId, title, eventDate, excludeEventId = null) {
+  const params = [userId, title, eventDate];
+  let sql =
+    "SELECT event_id FROM events WHERE user_id = ? AND LOWER(title) = LOWER(?) AND event_date = ?";
+  if (excludeEventId) {
+    sql += " AND event_id <> ?";
+    params.push(excludeEventId);
   }
-  for (const creatorCategory of creatorCategories) {
-    if (topicLower.includes(creatorCategory.toLowerCase())) {
-      return { relevant: true, categoryMatched: false };
-    }
-  }
-  return { relevant: false, categoryMatched: false };
+  const [rows] = await db.query(`${sql} LIMIT 1`, params);
+  return rows.length > 0;
 }
 
-// Has the creator already published something matching this topic in
-// the same window? A simple case-insensitive substring match against
-// title/description — transparent and easy to verify by hand, unlike a
-// fuzzy/ML approach.
-async function creatorHasCoveredTopic(topicLabel, windowDays) {
-  const likePattern = `%${String(topicLabel).toLowerCase()}%`;
-  const [rows] = await db.query(
-    `SELECT COUNT(*) AS cnt
-     FROM content c
-     JOIN scheduled_content sc ON sc.content_id = c.content_id
-     WHERE c.user_id = ?
-       AND sc.status = 'Published'
-       AND sc.published_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
-       AND (LOWER(c.title) LIKE ? OR LOWER(c.description) LIKE ?)`,
-    [DEFAULT_USER_ID, windowDays, likePattern, likePattern]
-  );
-  return Number(rows[0].cnt) > 0;
-}
-
-/**
- * Runs the full detection pass and upserts qualifying opportunities.
- * Returns { created, updated, skipped } counts for a clear before/after
- * when demonstrating this feature.
- */
-async function detectMissedOpportunities() {
-  const windowDays = opportunityEngine.OPPORTUNITY_WINDOW_DAYS;
-  const result = { created: 0, updated: 0, skipped: 0 };
-
-  const creatorCategories = await getCreatorCategoryScope();
-  if (creatorCategories.length === 0) {
-    // No categorised content yet -> no defined scope to match against.
-    // Correct empty state, not an error.
-    return result;
-  }
-
-  const [candidates] = await db.query(
-    `SELECT
-       LOWER(TRIM(cc.topic)) AS topic_key,
-       MIN(cc.topic) AS topic_label,
-       COUNT(DISTINCT cc.competitor_id) AS competitorCount,
-       MAX(cc.published_at) AS latestPostDate,
-       COALESCE(ROUND(AVG(
-         CASE WHEN cc.views = 0 THEN 0 ELSE (cc.likes + cc.comments + cc.shares) / cc.views * 100 END
-       ), 2), 0) AS avgEngagementRate,
-       GROUP_CONCAT(DISTINCT co.category SEPARATOR ',') AS competitorCategories
-     FROM competitor_content cc
-     JOIN competitors co ON co.competitor_id = cc.competitor_id
-     WHERE co.user_id = ?
-       AND cc.topic IS NOT NULL AND TRIM(cc.topic) <> ''
-       AND cc.published_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
-     GROUP BY topic_key`,
-    [DEFAULT_USER_ID, windowDays]
-  );
-
-  for (const candidate of candidates) {
-    const { relevant, categoryMatched } = checkTopicRelevance(
-      candidate.topic_label,
-      candidate.competitorCategories,
-      creatorCategories
-    );
-    if (!relevant) {
-      result.skipped++;
-      continue;
-    }
-
-    const covered = await creatorHasCoveredTopic(candidate.topic_label, windowDays);
-    if (covered) {
-      result.skipped++;
-      continue;
-    }
-
-    const daysSinceLatestPost = candidate.latestPostDate
-      ? (Date.now() - new Date(candidate.latestPostDate).getTime()) / (1000 * 60 * 60 * 24)
-      : null;
-
-    const relevanceScore = opportunityEngine.computeRelevanceScore(categoryMatched);
-    const competitorActivityScore = opportunityEngine.computeCompetitorActivityScore(
-      Number(candidate.competitorCount)
-    );
-    const engagementScore = opportunityEngine.computeEngagementScore(candidate.avgEngagementRate);
-    const timelinessScore = opportunityEngine.computeTimelinessScore(daysSinceLatestPost, windowDays);
-    const { opportunityScore, impactLevel } = opportunityEngine.computeOpportunityScore({
-      relevance: relevanceScore,
-      competitorActivity: competitorActivityScore,
-      engagement: engagementScore,
-      timeliness: timelinessScore,
-    });
-
-    const title = `Missed opportunity: ${candidate.topic_label}`;
-    const description =
-      `${candidate.competitorCount} competitor(s) posted about "${candidate.topic_label}" ` +
-      `in the last ${windowDays} days (average engagement ${candidate.avgEngagementRate}%). ` +
-      `No matching published content was found in the same window.`;
-    const deadline = candidate.latestPostDate
-      ? new Date(new Date(candidate.latestPostDate).getTime() + windowDays * 24 * 60 * 60 * 1000)
-      : null;
-
-    const [existing] = await db.query(
-      `SELECT opportunity_id FROM opportunities
-       WHERE user_id = ? AND title = ? AND status = 'Active'`,
-      [DEFAULT_USER_ID, title]
-    );
-
-    if (existing.length > 0) {
-      await db.query(
-        `UPDATE opportunities SET
-           description = ?, opportunity_deadline = ?,
-           relevance_score = ?, competitor_activity_score = ?,
-           engagement_score = ?, timeliness_score = ?,
-           opportunity_score = ?, impact_level = ?
-         WHERE opportunity_id = ?`,
-        [
-          description, deadline,
-          relevanceScore, competitorActivityScore,
-          engagementScore, timelinessScore,
-          opportunityScore, impactLevel,
-          existing[0].opportunity_id,
-        ]
-      );
-      result.updated++;
-    } else {
-      await db.query(
-        `INSERT INTO opportunities
-           (user_id, event_id, title, description, detected_at, opportunity_deadline,
-            relevance_score, competitor_activity_score, engagement_score, timeliness_score,
-            opportunity_score, impact_level, status)
-         VALUES (?, NULL, ?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, 'Active')`,
-        [
-          DEFAULT_USER_ID, title, description, deadline,
-          relevanceScore, competitorActivityScore,
-          engagementScore, timelinessScore,
-          opportunityScore, impactLevel,
-        ]
-      );
-      result.created++;
-    }
-  }
-
-  return result;
-}
+const DUPLICATE_EVENT_MESSAGE = "You already have an event with this title on this date.";
 
 app.get(
-  "/opportunities",
+  "/events",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    await detectMissedOpportunities();
-
-    const params = [DEFAULT_USER_ID];
-    let sql = "SELECT * FROM opportunities WHERE user_id = ?";
-    if (req.query.status) {
-      sql += " AND status = ?";
-      params.push(req.query.status);
-    }
-    sql += " ORDER BY opportunity_score DESC, detected_at DESC";
-
-    const [rows] = await db.query(sql, params);
-    res.json(
-      castNumbersAll(rows, [
-        "relevance_score",
-        "competitor_activity_score",
-        "engagement_score",
-        "timeliness_score",
-        "opportunity_score",
-      ])
+    const [rows] = await db.query(
+      `${EVENT_SELECT} WHERE user_id = ? ${EVENT_ORDER_SQL}`,
+      [getUserId(req)]
     );
+    res.json(rows);
   })
 );
 
 app.get(
-  "/opportunities/:id",
+  "/events/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [rows] = await db.query("SELECT * FROM opportunities WHERE opportunity_id = ?", [
-      req.params.id,
-    ]);
-    if (rows.length === 0) {
-      return res.status(404).json({ message: "Opportunity not found" });
-    }
-    res.json(
-      castNumbers(rows[0], [
-        "relevance_score",
-        "competitor_activity_score",
-        "engagement_score",
-        "timeliness_score",
-        "opportunity_score",
-      ])
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return res.status(404).json({ message: "Event not found" });
+
+    const [rows] = await db.query(
+      `${EVENT_SELECT} WHERE event_id = ? AND user_id = ?`,
+      [eventId, getUserId(req)]
     );
+    if (!rows.length) return res.status(404).json({ message: "Event not found" });
+    res.json(rows[0]);
   })
 );
 
-const OPPORTUNITY_STATUSES = ["Active", "Actioned", "Dismissed"];
+app.post(
+  "/events",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const { errors, value } = eventRules.validateEventInput(req.body);
+    if (errors.length) {
+      return res.status(400).json({ message: errors.join(" "), errors });
+    }
+
+    if (await eventAlreadyExists(userId, value.title, value.event_date)) {
+      return res.status(409).json({ message: DUPLICATE_EVENT_MESSAGE });
+    }
+
+    let insertId;
+    try {
+      const [result] = await db.query(
+        `INSERT INTO events (user_id, title, description, event_date, source, relevance_keywords)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          userId,
+          value.title,
+          value.description ?? null,
+          value.event_date,
+          value.source ?? null,
+          value.relevance_keywords ?? null,
+        ]
+      );
+      insertId = result.insertId;
+    } catch (err) {
+      // Only reachable if the optional unique index from the Phase 2 SQL
+      // has been added and two identical requests race each other.
+      if (err.code === "ER_DUP_ENTRY") {
+        return res.status(409).json({ message: DUPLICATE_EVENT_MESSAGE });
+      }
+      throw err;
+    }
+
+    const [rows] = await db.query(
+      `${EVENT_SELECT} WHERE event_id = ? AND user_id = ?`,
+      [insertId, userId]
+    );
+    res.status(201).json(rows[0]);
+  })
+);
 
 app.put(
-  "/opportunities/:id",
+  "/events/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const { status } = req.body || {};
-    const { id } = req.params;
+    const userId = getUserId(req);
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return res.status(404).json({ message: "Event not found" });
 
-    if (!status || !OPPORTUNITY_STATUSES.includes(status)) {
-      return res.status(400).json({
-        message: `status must be one of: ${OPPORTUNITY_STATUSES.join(", ")}`,
-      });
+    const { errors, value } = eventRules.validateEventInput(req.body, { partial: true });
+    if (errors.length) {
+      return res.status(400).json({ message: errors.join(" "), errors });
     }
 
-    const [existing] = await db.query("SELECT * FROM opportunities WHERE opportunity_id = ?", [id]);
-    if (existing.length === 0) {
-      return res.status(404).json({ message: "Opportunity not found" });
-    }
-
-    await db.query("UPDATE opportunities SET status = ? WHERE opportunity_id = ?", [status, id]);
-
-    const [rows] = await db.query("SELECT * FROM opportunities WHERE opportunity_id = ?", [id]);
-    res.json(
-      castNumbers(rows[0], [
-        "relevance_score",
-        "competitor_activity_score",
-        "engagement_score",
-        "timeliness_score",
-        "opportunity_score",
-      ])
+    const [existing] = await db.query(
+      "SELECT title, event_date FROM events WHERE event_id = ? AND user_id = ?",
+      [eventId, userId]
     );
+    if (!existing.length) return res.status(404).json({ message: "Event not found" });
+
+    const finalTitle = value.title !== undefined ? value.title : existing[0].title;
+    const finalDate = value.event_date !== undefined ? value.event_date : existing[0].event_date;
+    if (await eventAlreadyExists(userId, finalTitle, finalDate, eventId)) {
+      return res.status(409).json({ message: DUPLICATE_EVENT_MESSAGE });
+    }
+
+    const sets = [];
+    const params = [];
+    for (const column of EVENT_UPDATABLE_COLUMNS) {
+      if (Object.prototype.hasOwnProperty.call(value, column)) {
+        sets.push(`${column} = ?`);
+        params.push(value[column]);
+      }
+    }
+    params.push(eventId, userId);
+
+    try {
+      await db.query(
+        `UPDATE events SET ${sets.join(", ")} WHERE event_id = ? AND user_id = ?`,
+        params
+      );
+    } catch (err) {
+      if (err.code === "ER_DUP_ENTRY") {
+        return res.status(409).json({ message: DUPLICATE_EVENT_MESSAGE });
+      }
+      throw err;
+    }
+
+    const [rows] = await db.query(
+      `${EVENT_SELECT} WHERE event_id = ? AND user_id = ?`,
+      [eventId, userId]
+    );
+    res.json(rows[0]);
   })
 );
 
 app.delete(
-  "/opportunities/:id",
+  "/events/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [result] = await db.query("DELETE FROM opportunities WHERE opportunity_id = ?", [
-      req.params.id,
-    ]);
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Opportunity not found" });
-    }
-    res.json({ message: "Opportunity deleted" });
-  })
-);
+    const eventId = parseEventId(req.params.id);
+    if (!eventId) return res.status(404).json({ message: "Event not found" });
 
-// Explicit trigger (in addition to the auto-run on every GET /opportunities,
-// same convention as updateMissedScheduledContent()) — useful for a clean
-// before/after moment in a demo or test.
-app.post(
-  "/opportunities/detect",
-  asyncHandler(async (req, res) => {
-    const result = await detectMissedOpportunities();
-    res.json(result);
+    // opportunities.event_id is ON DELETE SET NULL, so any opportunity
+    // derived from this event survives with event_id = NULL; the next
+    // detection run expires it (see detectEventOpportunities).
+    const [result] = await db.query(
+      "DELETE FROM events WHERE event_id = ? AND user_id = ?",
+      [eventId, getUserId(req)]
+    );
+    if (!result.affectedRows) return res.status(404).json({ message: "Event not found" });
+    res.json({ message: "Event deleted" });
   })
 );
 
 // =======================================================================
-// RECOMMENDATION ENGINE (rule-based — see backend/services/
-// recommendationEngine.js for the four threshold checks, which are pure
-// functions with no DB access so they can be unit-tested on their own).
+// OPPORTUNITY DETECTION
 //
-// DATA -> ANALYSIS -> RULE -> RECOMMENDATION, applied here as:
-//   1. Reuse the existing consistency / performance / competitor-activity
-//      queries and opportunity rows (DATA + ANALYSIS — no second copy of
-//      any formula).
-//   2. Pass the resulting numbers into recommendationEngine's threshold
-//      checks (RULE).
-//   3. Build the explainable message/reason text and upsert a row
-//      (RECOMMENDATION).
+// Opportunities are decision-support signals based on the creator's own
+// topics/content, analytics, schedule, events, and recent public YouTube
+// activity. Competitors are deliberately not part of this engine.
 //
-// Each recommendation type keeps a STABLE message per subject (the
-// category name, the opportunity title, the competitor name) so
-// re-running this on the same subject updates the existing Active row's
-// `reason` with fresh numbers instead of creating a duplicate.
-// =======================================================================
+// Legacy numerical/scoring columns remain in the database for compatibility
+// with older rows and the later recommendation cleanup. New detection never
+// reads or writes those fields.
 
-async function upsertRecommendation({ type, message, reason, opportunityId = null }) {
-  const [existing] = await db.query(
-    `SELECT recommendation_id FROM recommendations
-     WHERE recommendation_type = ? AND message = ? AND status = 'Active'`,
-    [type, message]
+const OPPORTUNITY_STATUSES = ["Active", "Actioned", "Dismissed"];
+
+async function getCreatorTopics(userId) {
+  const [rows] = await db.query(
+    `SELECT DISTINCT cat.category_id, cat.category_name
+       FROM content_categories cc
+       JOIN categories cat ON cat.category_id = cc.category_id
+       JOIN content c ON c.content_id = cc.content_id
+      WHERE c.user_id = ?
+      ORDER BY cat.category_name`,
+    [userId]
   );
+  return rows;
+}
 
-  if (existing.length > 0) {
-    await db.query(`UPDATE recommendations SET reason = ? WHERE recommendation_id = ?`, [
-      reason,
-      existing[0].recommendation_id,
-    ]);
+async function upsertOpportunity({
+  userId,
+  type,
+  title,
+  description,
+  source,
+  deadline = null,
+  eventId = null,
+}) {
+  if (!opportunityEngine.isValidOpportunityType(type)) {
+    throw new Error(`Unsupported opportunity type: ${type}`);
+  }
+
+   const [existing] = await db.query(
+    `SELECT opportunity_id, status, detected_at
+       FROM opportunities
+      WHERE user_id = ? AND opportunity_type = ? AND title = ?
+      ORDER BY opportunity_id DESC
+      LIMIT 1`,
+    [userId, type, title]
+  );
+  const latest = existing[0];
+
+  if (latest && latest.status === "Active") {
+    await db.query(
+      `UPDATE opportunities
+          SET description = ?, source = ?, opportunity_deadline = ?,
+              event_id = ?, detected_at = NOW()
+        WHERE opportunity_id = ? AND user_id = ?`,
+      [description, source, deadline, eventId, latest.opportunity_id, userId]
+    );
     return "updated";
   }
 
+    if (latest && latest.status === "Expired") {
+    // The engine closed this earlier because its signal disappeared; the
+    // signal is back, so reopen the same row instead of adding another.
+    await db.query(
+      `UPDATE opportunities
+          SET status = 'Active', description = ?, source = ?, opportunity_deadline = ?,
+              event_id = ?, detected_at = NOW()
+        WHERE opportunity_id = ? AND user_id = ?`,
+      [description, source, deadline, eventId, latest.opportunity_id, userId]
+    );
+    return "updated";
+  }
+
+  // Closed by the creator (Actioned/Dismissed): don't recreate it on the
+  // next detection run. detected_at is the last time it was refreshed
+  // while Active, i.e. roughly when the creator closed it.
+  if (latest && !recommendationEngine.shouldResurface(latest.detected_at)) {
+    return "skipped";
+  }
+
   await db.query(
-    `INSERT INTO recommendations (user_id, opportunity_id, recommendation_type, message, reason, status)
-     VALUES (?, ?, ?, ?, ?, 'Active')`,
-    [DEFAULT_USER_ID, opportunityId, type, message, reason]
+    `INSERT INTO opportunities
+       (user_id, event_id, opportunity_type, title, description, source,
+        detected_at, opportunity_deadline, status)
+     VALUES (?, ?, ?, ?, ?, ?, NOW(), ?, 'Active')`,
+    [userId, eventId, type, title, description, source, deadline]
   );
   return "created";
 }
 
-/**
- * Runs all four recommendation rules and upserts qualifying
- * recommendations. Returns { created, updated, skipped } counts for a
- * clear before/after when demonstrating this feature.
- */
-async function generateRecommendations() {
-  const result = { created: 0, updated: 0, skipped: 0 };
-  const record = (outcome) => {
-    result[outcome === "created" ? "created" : outcome === "updated" ? "updated" : "skipped"]++;
-  };
+async function detectContentGaps(userId, topics) {
+  const result = { created: 0, updated: 0, skipped: 0 };      // CHANGED
 
-  // ---- Rule 1: low posting consistency ----
-  await updateMissedScheduledContent();
-  const consistency = await computeOverallConsistency();
-  if (
-    recommendationEngine.qualifiesForConsistencyReview(
-      consistency.consistencyPercentage,
-      consistency.eligibleContent
-    )
-  ) {
-    record(
-      await upsertRecommendation({
-        type: "ReviewMissedContent",
-        message: "Review your missed scheduled content",
-        reason:
-          `Posting consistency is ${consistency.consistencyPercentage}% ` +
-          `(${consistency.publishedCount} published / ${consistency.missedCount} missed ` +
-          `out of ${consistency.eligibleContent} eligible items), below the ${recommendationEngine.CONSISTENCY_LOW_THRESHOLD}% target.`,
-      })
+  for (const topic of topics) {
+    const [[row]] = await db.query(
+      `SELECT MAX(COALESCE(sc.published_at, c.created_at)) AS latest_date
+         FROM content_categories cc
+         JOIN content c ON c.content_id = cc.content_id
+         LEFT JOIN scheduled_content sc
+           ON sc.content_id = c.content_id AND sc.status = 'Published'
+        WHERE c.user_id = ? AND cc.category_id = ?`,
+      [userId, topic.category_id]
     );
-  } else {
-    result.skipped++;
+
+    const latest = row && row.latest_date ? new Date(row.latest_date) : null;
+    const recent = opportunityEngine.hasRecentContent(latest, 30);
+
+    if (recent) continue;
+
+    const outcome = await upsertOpportunity({
+      userId,
+      type: "ContentGap",
+      title: `Content gap: ${topic.category_name}`,
+      description: latest
+        ? `You haven't published recently about ${topic.category_name}. Your last recorded published item in this category was on ${latest.toISOString().slice(0, 10)}.`
+        : `You have used ${topic.category_name} as a topic, but no recent published content was found for it.`,
+      source: "Creator content history",
+    });
+    result[outcome]++;
   }
 
-  // ---- Rule 2: a category clearly outperforms the creator's overall average ----
+  return result;
+}
+
+async function detectPostingOpportunities(userId) {
+  const result = { created: 0, updated: 0, skipped: 0 };
+
+  const [history] = await db.query(
+    `SELECT DAYOFWEEK(sc.published_at) AS weekday, COUNT(*) AS publish_count
+       FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
+      WHERE c.user_id = ?
+        AND sc.status = 'Published'
+        AND sc.published_at IS NOT NULL
+      GROUP BY DAYOFWEEK(sc.published_at)
+      HAVING COUNT(*) >= 2`,
+    [userId]
+  );
+
+  if (!history.length) return result;
+
+  const [scheduled] = await db.query(
+    `SELECT scheduled_date
+       FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
+      WHERE c.user_id = ?
+        AND sc.status = 'Scheduled'
+        AND sc.scheduled_date >= NOW()
+        AND sc.scheduled_date < DATE_ADD(NOW(), INTERVAL 14 DAY)`,
+    [userId]
+  );
+
+  const scheduledDates = scheduled.map((row) => new Date(row.scheduled_date));
+  const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+  for (const row of history) {
+    const weekday = Number(row.weekday) - 1;
+    const occurrence = new Date();
+    occurrence.setHours(12, 0, 0, 0);
+
+    let daysAhead = (weekday - occurrence.getDay() + 7) % 7;
+    if (daysAhead === 0) daysAhead = 7;
+    occurrence.setDate(occurrence.getDate() + daysAhead);
+
+    const alreadyScheduled = scheduledDates.some((date) =>
+      date.getFullYear() === occurrence.getFullYear() &&
+      date.getMonth() === occurrence.getMonth() &&
+      date.getDate() === occurrence.getDate()
+    );
+    if (alreadyScheduled) continue;
+
+    const outcome = await upsertOpportunity({
+      userId,
+      type: "PostingOpportunity",
+      title: `Posting opportunity: ${weekdayNames[weekday]}`,
+      description:
+        `You have historically published on ${weekdayNames[weekday]} (${row.publish_count} recorded published item(s)), ` +
+        `but no content is currently scheduled for ${occurrence.toISOString().slice(0, 10)}.`,
+      source: "Creator publishing history and schedule",
+      deadline: occurrence,
+    });
+    result[outcome]++;
+  }
+
+  return result;
+}
+
+async function detectEventOpportunities(userId, topics) {
+  const result = { created: 0, updated: 0, skipped: 0, expired: 0 };
+  const currentTitles = new Set();
+
+  // Only this creator's own upcoming events, inside the look-ahead window.
+  // Past events never produce opportunities.
+  const [events] = await db.query(
+    `SELECT event_id, title, description, event_date, source, relevance_keywords
+       FROM events
+      WHERE user_id = ?
+        AND event_date IS NOT NULL
+        AND event_date >= CURDATE()
+        AND event_date <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
+      ORDER BY event_date ASC`,
+    [userId, eventRules.EVENT_LOOKAHEAD_DAYS]
+  );
+
+  for (const event of events) {
+    // An event with no link to any of the creator's topics is skipped,
+    // never forced into an opportunity.
+    const topic = eventRules.findMatchingTopic(event, topics);
+    if (!topic) continue;
+
+    const dateLabel = String(event.event_date).slice(0, 10);
+    // The date is part of the title so the same event on another date (or
+    // a recurring event) is its own opportunity, and so moving an event
+    // retires the old opportunity instead of leaving a wrong deadline.
+    const title = `Event opportunity: ${event.title} (${dateLabel})`;
+    currentTitles.add(title);
+
+    const outcome = await upsertOpportunity({
+      userId,
+      type: "EventOpportunity",
+      title,
+      description:
+        `${event.title} is on ${dateLabel} and its title, description or keywords ` +
+        `mention your ${topic.category_name} topic.`,
+      source: event.source || "Creator event",
+      deadline: new Date(`${dateLabel}T23:59:59`),
+      eventId: event.event_id,
+    });
+    result[outcome]++;
+  }
+
+  // Close Active event opportunities whose event is gone, past, edited or
+  // no longer matches a topic. They are marked Expired (engine-closed),
+  // not Dismissed, which is reserved for the creator's own choice.
+  const [activeRows] = await db.query(
+    `SELECT opportunity_id, title
+       FROM opportunities
+      WHERE user_id = ? AND opportunity_type = 'EventOpportunity' AND status = 'Active'`,
+    [userId]
+  );
+  const staleIds = activeRows
+    .filter((row) => !currentTitles.has(row.title))
+    .map((row) => row.opportunity_id);
+  if (staleIds.length) {
+    await db.query(
+      `UPDATE opportunities SET status = 'Expired'
+        WHERE user_id = ? AND opportunity_id IN (?)`,
+      [userId, staleIds]
+    );
+    result.expired = staleIds.length;
+  }
+
+  return result;
+}
+
+async function detectHighPerformingTopics(userId) {
+  const result = { created: 0, updated: 0, skipped: 0 };
+
   const [[overallRow]] = await db.query(
-    `SELECT COALESCE(ROUND(AVG(
-       CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
-     ), 2), 0) AS averageEngagementRate
-     FROM performance_metrics pm`
+    `SELECT COALESCE(AVG(
+       CASE WHEN pm.views = 0 THEN 0
+            ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
+     ), 0) AS overall_engagement
+       FROM performance_metrics pm
+       JOIN content c ON c.content_id = pm.content_id
+      WHERE c.user_id = ?`,
+    [userId]
   );
-  const overallAvgEngagement = Number(overallRow.averageEngagementRate);
+  const overall = Number(overallRow.overall_engagement) || 0;
+  if (overall <= 0) return result;
 
-  const [categoryRows] = await db.query(
+  const [rows] = await db.query(
     `SELECT cat.category_name,
-            COUNT(DISTINCT pm.metric_id) AS contentCount,
-            COALESCE(ROUND(AVG(
-              CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
-            ), 2), 0) AS averageEngagementRate
-     FROM content_categories ccat
-     JOIN categories cat ON cat.category_id = ccat.category_id
-     JOIN performance_metrics pm ON pm.content_id = ccat.content_id
-     GROUP BY cat.category_id, cat.category_name`
+            COUNT(DISTINCT pm.metric_id) AS metric_count,
+            COALESCE(AVG(
+              CASE WHEN pm.views = 0 THEN 0
+                   ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
+            ), 0) AS average_engagement
+       FROM content_categories cc
+       JOIN categories cat ON cat.category_id = cc.category_id
+       JOIN content c ON c.content_id = cc.content_id
+       JOIN performance_metrics pm ON pm.content_id = c.content_id
+      WHERE c.user_id = ?
+      GROUP BY cat.category_id, cat.category_name
+      HAVING COUNT(DISTINCT pm.metric_id) >= ?`,
+    [userId, recommendationEngine.MIN_CONTENT_FOR_CATEGORY_RULE]
   );
-  for (const row of categoryRows) {
-    const avg = Number(row.averageEngagementRate);
-    const count = Number(row.contentCount);
-    if (recommendationEngine.qualifiesForCategoryRecommendation(avg, count, overallAvgEngagement)) {
-      record(
-        await upsertRecommendation({
-          type: "ProduceMoreInCategory",
-          message: `Consider producing more content in the "${row.category_name}" category`,
-          reason:
-            `Average engagement rate for "${row.category_name}" is ${avg}% across ${count} ` +
-            `tracked item(s), vs your overall average of ${overallAvgEngagement}%.`,
-        })
-      );
-    } else {
-      result.skipped++;
-    }
+
+  for (const row of rows) {
+    const average = Number(row.average_engagement) || 0;
+    if (!opportunityEngine.qualifiesAsHighPerformingTopic(
+      average,
+      overall,
+      Number(row.metric_count),
+      {
+        multiplier: recommendationEngine.CATEGORY_OUTPERFORM_MULTIPLIER,
+        minimumRecords: recommendationEngine.MIN_CONTENT_FOR_CATEGORY_RULE,
+      }
+    )) continue;
+
+    const outcome = await upsertOpportunity({
+      userId,
+      type: "HighPerformingTopic",
+      title: `High-performing topic: ${row.category_name}`,
+      description:
+        `${row.category_name} has an average engagement rate of ${average.toFixed(2)}% across ` +
+        `${row.metric_count} tracked performance record(s), compared with your overall ` +
+        `average of ${overall.toFixed(2)}%.`,
+      source: "Creator performance metrics",
+    });
+    result[outcome]++;
   }
 
-  // ---- Rule 3: a still-actionable High-impact opportunity ----
-  const [opportunityRows] = await db.query(
-    `SELECT * FROM opportunities WHERE user_id = ? AND status = 'Active'`,
-    [DEFAULT_USER_ID]
-  );
-  for (const opp of opportunityRows) {
-    if (recommendationEngine.qualifiesForOpportunityAction(opp)) {
-      record(
-        await upsertRecommendation({
-          type: "ActOnOpportunity",
-          message: `Act on the "${opp.title}" opportunity`,
-          reason:
-            `This opportunity scored ${opp.opportunity_score} (High impact). ` +
-            (opp.opportunity_deadline
-              ? `It remains actionable until ${new Date(opp.opportunity_deadline).toISOString().slice(0, 10)}.`
-              : `It has no fixed deadline.`),
-          opportunityId: opp.opportunity_id,
-        })
-      );
-    } else {
-      result.skipped++;
-    }
-  }
+  return result;
+}
 
-  // ---- Rule 4: a tracked competitor significantly outperforms the creator ----
-  const [creatorEngagementRows] = await db.query(
-    `SELECT COALESCE(ROUND(AVG(
-       CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
-     ), 2), 0) AS averageEngagementRate
-     FROM performance_metrics pm
-     WHERE pm.recorded_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`
-  );
-  const creatorAvgEngagement = Number(creatorEngagementRows[0].averageEngagementRate);
+async function detectRecentTopics(userId, topics) {
+  const result = { created: 0, updated: 0, skipped: 0 };
+  if (!topics.length) return result;
 
-  const [competitorRows] = await db.query(
-    `SELECT co.name,
-            COUNT(cc.competitor_content_id) AS postCount,
-            COALESCE(ROUND(AVG(
-              CASE WHEN cc.views = 0 THEN 0 ELSE (cc.likes + cc.comments + cc.shares) / cc.views * 100 END
-            ), 2), 0) AS averageEngagementRate
-     FROM competitors co
-     LEFT JOIN competitor_content cc
-       ON cc.competitor_id = co.competitor_id
-       AND cc.published_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-     WHERE co.user_id = ?
-     GROUP BY co.competitor_id, co.name`,
-    [DEFAULT_USER_ID]
+  const [userRows] = await db.query(
+    "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 1",
+    [userId]
   );
-  for (const row of competitorRows) {
-    const avg = Number(row.averageEngagementRate);
-    const count = Number(row.postCount);
-    if (recommendationEngine.qualifiesForCompetitorReview(avg, count, creatorAvgEngagement)) {
-      record(
-        await upsertRecommendation({
-          type: "ReviewCompetitorPatterns",
-          message: `Review "${row.name}"'s recent content patterns`,
-          reason:
-            `"${row.name}" averaged ${avg}% engagement over ${count} recent post(s), ` +
-            `vs your ${creatorAvgEngagement}% over the same 30-day window.`,
-        })
-      );
-    } else {
+  if (!userRows[0]?.youtube_channel_id) return result;
+
+  for (const topic of topics) {
+    try {
+      const videos = await youtubeService.searchPublicVideosByTopic(topic.category_name, {
+        maxResults: 5,
+      });
+      const recentVideo = videos.find((video) => video.publishedAt);
+      if (!recentVideo) continue;
+
+      const outcome = await upsertOpportunity({
+        userId,
+        type: "RecentTopic",
+        title: `Recent topic: ${topic.category_name}`,
+        description:
+          `A recent public YouTube video relevant to ${topic.category_name} was published: ` +
+          `"${recentVideo.title}" on ${new Date(recentVideo.publishedAt).toISOString().slice(0, 10)}.`,
+        source: "YouTube Data API",
+      });
+      result[outcome]++;
+    } catch (error) {
+      console.error(`Recent YouTube topic lookup failed for "${topic.category_name}":`, error.message);
       result.skipped++;
     }
   }
@@ -3008,31 +3425,515 @@ async function generateRecommendations() {
   return result;
 }
 
-app.get(
-  "/recommendations",
-  asyncHandler(async (req, res) => {
-    await generateRecommendations();
+async function detectOpportunities(userId) {
+  const topics = await getCreatorTopics(userId);
+  const result = { created: 0, updated: 0, skipped: 0 };
 
-    const params = [DEFAULT_USER_ID];
-    let sql = "SELECT * FROM recommendations WHERE user_id = ?";
+  for (const detector of [
+    () => detectContentGaps(userId, topics),
+    () => detectPostingOpportunities(userId),
+    () => detectEventOpportunities(userId, topics),
+    () => detectHighPerformingTopics(userId),
+    () => detectRecentTopics(userId, topics),
+  ]) {
+    const pass = await detector();
+    result.created += pass.created || 0;
+    result.updated += pass.updated || 0;
+    result.skipped += pass.skipped || 0;
+  }
+
+  return result;
+}
+
+function opportunityColumns() {
+  return `
+    opportunity_id, user_id, event_id, opportunity_type, title, description,
+    source, detected_at, opportunity_deadline, status
+  `;
+}
+
+app.get(
+  "/opportunities",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    await detectOpportunities(userId);
+
+    const params = [userId];
+    let sql = `SELECT ${opportunityColumns()} FROM opportunities WHERE user_id = ?`;
     if (req.query.status) {
       sql += " AND status = ?";
       params.push(req.query.status);
     }
-    sql += " ORDER BY created_at DESC";
+    sql += " ORDER BY detected_at DESC";
 
     const [rows] = await db.query(sql, params);
     res.json(rows);
   })
 );
 
+app.get(
+  "/opportunities/recent-topics",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const topics = await getCreatorTopics(userId);
+
+    const [userRows] = await db.query(
+      "SELECT youtube_channel_id FROM users WHERE user_id = ? LIMIT 1",
+      [userId]
+    );
+    if (!userRows[0]?.youtube_channel_id) {
+      return res.status(400).json({
+        message: "Connect a YouTube channel before discovering recent topics.",
+        code: "YOUTUBE_CHANNEL_NOT_CONFIGURED",
+      });
+    }
+
+    const results = [];
+    for (const topic of topics) {
+      try {
+        results.push({
+          topic: topic.category_name,
+          videos: await youtubeService.searchPublicVideosByTopic(topic.category_name, {
+            maxResults: 5,
+          }),
+        });
+      } catch (error) {
+        results.push({
+          topic: topic.category_name,
+          videos: [],
+          error: error.message,
+        });
+      }
+    }
+    res.json(results);
+  })
+);
+
+app.get(
+  "/opportunities/:id",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const [rows] = await db.query(
+      `SELECT ${opportunityColumns()}
+         FROM opportunities
+        WHERE opportunity_id = ? AND user_id = ?`,
+      [req.params.id, getUserId(req)]
+    );
+    if (!rows.length) return res.status(404).json({ message: "Opportunity not found" });
+    res.json(rows[0]);
+  })
+);
+
+app.put(
+  "/opportunities/:id",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { status } = req.body || {};
+    const userId = getUserId(req);
+
+    if (!OPPORTUNITY_STATUSES.includes(status)) {
+      return res.status(400).json({
+        message: `status must be one of: ${OPPORTUNITY_STATUSES.join(", ")}`,
+      });
+    }
+
+    const [existing] = await db.query(
+      "SELECT opportunity_id FROM opportunities WHERE opportunity_id = ? AND user_id = ?",
+      [req.params.id, userId]
+    );
+    if (!existing.length) return res.status(404).json({ message: "Opportunity not found" });
+
+    await db.query(
+      "UPDATE opportunities SET status = ? WHERE opportunity_id = ? AND user_id = ?",
+      [status, req.params.id, userId]
+    );
+
+    const [rows] = await db.query(
+      `SELECT ${opportunityColumns()}
+         FROM opportunities
+        WHERE opportunity_id = ? AND user_id = ?`,
+      [req.params.id, userId]
+    );
+    res.json(rows[0]);
+  })
+);
+
+app.delete(
+  "/opportunities/:id",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const [result] = await db.query(
+      "DELETE FROM opportunities WHERE opportunity_id = ? AND user_id = ?",
+      [req.params.id, getUserId(req)]
+    );
+    if (!result.affectedRows) return res.status(404).json({ message: "Opportunity not found" });
+    res.json({ message: "Opportunity deleted" });
+  })
+);
+
+app.post(
+  "/opportunities/detect",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    res.json(await detectOpportunities(getUserId(req)));
+  })
+);
+
+
+
+// =======================================================================
+// RECOMMENDATION ENGINE (rule-based — see backend/services/
+// recommendationEngine.js for the thresholds and rule checks, which are
+// pure functions with no DB access so they can be unit-tested on their
+// own).
+//
+// The engine is built ONLY from the creator's own data and the creator's
+// own opportunities (see OPPORTUNITY DETECTION above). It never reads the
+// competitors / competitor_content tables, so it works identically for a
+// creator with zero competitors.
+//
+// DATA -> ANALYSIS -> RULE -> RECOMMENDATION, applied here as:
+//   Rule A  low posting consistency            (creator schedule data)
+//   Rule B  strong-performing topic/category   (creator performance data)
+//   Rule C  ContentGap opportunity
+//   Rule D  PostingOpportunity opportunity
+//   Rule E  EventOpportunity opportunity
+//   Rule F  RecentTopic opportunity
+// HighPerformingTopic opportunities are NOT a separate rule: they describe
+// the same signal as Rule B, so Rule B produces the single recommendation
+// and links it to the matching opportunity.
+//
+// Each recommendation has a STABLE message per subject (the topic, the
+// weekday, the event, the category) so re-running this on the same signal
+// updates the existing row instead of creating a duplicate. Numbers and
+// dates live in `reason`, which is refreshed on every run.
+//
+// Recommendation statuses: Active, Actioned, Dismissed (set by the
+// creator) and Expired (set by the engine when the signal that produced
+// the recommendation is no longer true).
+// =======================================================================
+
 const RECOMMENDATION_STATUSES = ["Active", "Actioned", "Dismissed"];
+
+function recommendationColumns() {
+  return `
+    recommendation_id, user_id, opportunity_id, recommendation_type, title,
+    message, reason, created_at, updated_at, status
+  `;
+}
+
+function recommendationOrderSql() {
+  return `${recommendationEngine.displayOrderSql("recommendation_type")}, created_at DESC`;
+}
+
+// generateRecommendations() runs from several routes (dashboard summary,
+// GET /recommendations, POST /recommendations/generate). Two runs for the
+// same user at the same moment could both find "no row yet" and both
+// insert. This queues runs per user so they execute one after another.
+// (Single Node process only — see the note in the audit about a database
+// unique constraint if the app is ever run on several instances.)
+const recommendationRunQueues = new Map();
+
+function runRecommendationsExclusively(userId, task) {
+  const previous = recommendationRunQueues.get(userId) || Promise.resolve();
+  const run = previous.catch(() => {}).then(task);
+  const tail = run.catch(() => {});
+  recommendationRunQueues.set(userId, tail);
+  tail.then(() => {
+    if (recommendationRunQueues.get(userId) === tail) recommendationRunQueues.delete(userId);
+  });
+  return run;
+}
+
+function recommendationKey(type, message) {
+  return `${type}|${message}`;
+}
+
+function dateOnly(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+}
+
+/**
+ * Creates or refreshes one recommendation. Identity is
+ * (user, type, message). Outcomes:
+ *   created  - no row existed, or a closed row is old enough to resurface
+ *   updated  - an Active (or engine-Expired) row was refreshed
+ *   skipped  - the creator already Dismissed/Actioned it recently
+ */
+async function upsertRecommendation({ userId, type, title, message, reason, opportunityId = null }) {
+  const [rows] = await db.query(
+    `SELECT recommendation_id, status, updated_at
+       FROM recommendations
+      WHERE user_id = ? AND recommendation_type = ? AND message = ?
+      ORDER BY recommendation_id DESC
+      LIMIT 1`,
+    [userId, type, message]
+  );
+  const latest = rows[0];
+
+  const insert = async () => {
+    await db.query(
+      `INSERT INTO recommendations
+         (user_id, opportunity_id, recommendation_type, title, message, reason, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'Active')`,
+      [userId, opportunityId, type, title, message, reason]
+    );
+    return "created";
+  };
+
+  if (!latest) return insert();
+
+  if (latest.status === "Active") {
+    await db.query(
+      `UPDATE recommendations
+          SET title = ?, reason = ?, opportunity_id = ?
+        WHERE recommendation_id = ? AND user_id = ?`,
+      [title, reason, opportunityId, latest.recommendation_id, userId]
+    );
+    return "updated";
+  }
+
+  if (latest.status === "Expired") {
+    // The engine closed it earlier because the signal disappeared; the
+    // signal is back, so reopen the same row rather than adding another.
+    await db.query(
+      `UPDATE recommendations
+          SET status = 'Active', title = ?, reason = ?, opportunity_id = ?,
+              created_at = NOW()
+        WHERE recommendation_id = ? AND user_id = ?`,
+      [title, reason, opportunityId, latest.recommendation_id, userId]
+    );
+    return "updated";
+  }
+
+  // Dismissed / Actioned by the creator: respect that unless it has been
+  // a long time and the signal is still true.
+  if (recommendationEngine.shouldResurface(latest.updated_at)) return insert();
+  return "skipped";
+}
+
+// Turns one Active opportunity into { type, title, message, reason }.
+// Every word that names a topic/day/event comes from the opportunity row.
+// Wording is deliberately non-predictive: these are suggestions based on
+// the creator's own history, not forecasts of views or engagement.
+function buildOpportunityRecommendation(opportunity) {
+  const type = recommendationEngine.opportunityRecommendationType(opportunity.opportunity_type);
+  if (!type) return null;
+
+  const subject = recommendationEngine.opportunitySubject(opportunity);
+  const deadline = opportunity.opportunity_deadline ? dateOnly(opportunity.opportunity_deadline) : null;
+  const detail = opportunity.description ? `${opportunity.description} ` : "";
+  const sourceNote = opportunity.source ? `Source: ${opportunity.source}.` : "";
+
+  switch (opportunity.opportunity_type) {
+    case "ContentGap":
+      return {
+        type,
+        title: `Cover ${subject} again`,
+        message: `Consider creating new content about ${subject}, a topic you haven't covered recently.`,
+        reason: `${detail}${sourceNote}`.trim(),
+      };
+    case "PostingOpportunity":
+      return {
+        type,
+        title: `Schedule a ${subject} post`,
+        message: `Consider scheduling your next piece of content for ${subject}, based on the days you usually publish.`,
+        reason:
+          `${detail}This is based on your own posting pattern, not a forecast of the post's results. ${sourceNote}`.trim(),
+      };
+    case "EventOpportunity":
+      return {
+        type,
+        title: `Plan content for ${subject}`,
+        message: `Consider planning content related to ${subject} before the event date.`,
+        reason:
+          `${detail}${deadline ? `The event is on ${deadline}. ` : ""}${sourceNote}`.trim(),
+      };
+    case "RecentTopic":
+      return {
+        type,
+        title: `Explore a recent ${subject} topic`,
+        message:
+          `Consider reviewing a recent public YouTube topic related to ${subject} and deciding whether it suits your audience.`,
+        reason:
+          `${detail}This is topic discovery only; it says nothing about how content on this topic would perform. ${sourceNote}`.trim(),
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Runs every recommendation rule for ONE user and upserts qualifying
+ * recommendations. Returns { created, updated, skipped, expired } counts
+ * for a clear before/after when demonstrating this feature.
+ *
+ * refreshOpportunities: run opportunity detection first. The explicit
+ * recommendation routes pass true; the dashboard summary passes nothing
+ * because it has just run detection itself (this avoids a second round of
+ * YouTube API calls in the same request).
+ */
+function generateRecommendations(userId, { refreshOpportunities = false } = {}) {
+  return runRecommendationsExclusively(userId, async () => {
+    const result = { created: 0, updated: 0, skipped: 0, expired: 0 };
+    const currentKeys = new Set();
+
+    const apply = async (recommendation) => {
+      currentKeys.add(recommendationKey(recommendation.type, recommendation.message));
+      const outcome = await upsertRecommendation({ userId, ...recommendation });
+      result[outcome]++;
+    };
+
+    if (refreshOpportunities) await detectOpportunities(userId);
+
+    // ---- Rule A: low posting consistency (unchanged rule) ----
+    await updateMissedScheduledContent();
+    const consistency = await computeOverallConsistency(userId);
+    if (
+      recommendationEngine.qualifiesForConsistencyReview(
+        consistency.consistencyPercentage,
+        consistency.eligibleContent
+      )
+    ) {
+      await apply({
+        type: "ReviewMissedContent",
+        title: "Improve posting consistency",
+        message:
+          "Your posting consistency is below target. Consider reviewing your missed scheduled content and planning your next posts.",
+        reason:
+          `Posting consistency is ${consistency.consistencyPercentage}% ` +
+          `(${consistency.publishedCount} published / ${consistency.missedCount} missed ` +
+          `out of ${consistency.eligibleContent} eligible items), below the ${recommendationEngine.CONSISTENCY_LOW_THRESHOLD}% target.`,
+      });
+    }
+
+    // ---- Active, still-open opportunities for THIS user only ----
+    const [opportunityRows] = await db.query(
+      `SELECT ${opportunityColumns()}
+         FROM opportunities
+        WHERE user_id = ? AND status = 'Active'`,
+      [userId]
+    );
+
+    // ---- Rule B: a topic/category clearly outperforms the creator's own
+    // overall average (unchanged rule; one recommendation per category,
+    // linked to its HighPerformingTopic opportunity when one exists) ----
+    const [[overallRow]] = await db.query(
+      `SELECT COALESCE(ROUND(AVG(
+         CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
+       ), 2), 0) AS averageEngagementRate
+       FROM performance_metrics pm
+       JOIN content c ON c.content_id = pm.content_id
+       WHERE c.user_id = ?`,
+      [userId]
+    );
+    const overallAvgEngagement = Number(overallRow.averageEngagementRate);
+
+    const [categoryRows] = await db.query(
+      `SELECT cat.category_name,
+              COUNT(DISTINCT pm.metric_id) AS contentCount,
+              COALESCE(ROUND(AVG(
+                CASE WHEN pm.views = 0 THEN 0 ELSE (pm.likes + pm.comments + pm.shares) / pm.views * 100 END
+              ), 2), 0) AS averageEngagementRate
+       FROM content_categories ccat
+       JOIN categories cat ON cat.category_id = ccat.category_id
+       JOIN content c ON c.content_id = ccat.content_id
+       JOIN performance_metrics pm ON pm.content_id = ccat.content_id
+       WHERE c.user_id = ?
+       GROUP BY cat.category_id, cat.category_name`,
+      [userId]
+    );
+
+    const highPerformingByTitle = new Map(
+      opportunityRows
+        .filter((opp) => opp.opportunity_type === "HighPerformingTopic")
+        .map((opp) => [opp.title, opp.opportunity_id])
+    );
+
+    for (const row of categoryRows) {
+      const avg = Number(row.averageEngagementRate);
+      const count = Number(row.contentCount);
+      if (!recommendationEngine.qualifiesForCategoryRecommendation(avg, count, overallAvgEngagement)) continue;
+
+      await apply({
+        type: "ProduceMoreInCategory",
+        title: `Create more ${row.category_name} content`,
+        message:
+          `Your "${row.category_name}" content has been performing strongly compared with your overall content. ` +
+          `Consider creating more content around this topic.`,
+        reason:
+          `Average engagement rate for "${row.category_name}" is ${avg}% across ${count} ` +
+          `tracked item(s), vs your overall average of ${overallAvgEngagement}%.`,
+        opportunityId: highPerformingByTitle.get(`High-performing topic: ${row.category_name}`) || null,
+      });
+    }
+
+    // ---- Rules C-F: ContentGap, PostingOpportunity, EventOpportunity,
+    // RecentTopic. HighPerformingTopic is intentionally not handled here
+    // (covered by Rule B above). ----
+    const now = new Date();
+    for (const opportunity of opportunityRows) {
+      if (!recommendationEngine.qualifiesForOpportunityRecommendation(opportunity, now)) continue;
+      const built = buildOpportunityRecommendation(opportunity);
+      if (!built) continue;
+      await apply({ ...built, opportunityId: opportunity.opportunity_id });
+    }
+
+    // ---- Retire Active recommendations whose signal is gone. This also
+    // closes any legacy ActOnOpportunity / ReviewCompetitorPatterns rows
+    // left over from the old competitor-based engine (kept, not deleted). ----
+    const [activeRows] = await db.query(
+      `SELECT recommendation_id, recommendation_type, message
+         FROM recommendations
+        WHERE user_id = ? AND status = 'Active'`,
+      [userId]
+    );
+    const staleIds = activeRows
+      .filter((row) => !currentKeys.has(recommendationKey(row.recommendation_type, row.message)))
+      .map((row) => row.recommendation_id);
+    if (staleIds.length) {
+      await db.query(
+        `UPDATE recommendations SET status = 'Expired'
+          WHERE user_id = ? AND recommendation_id IN (?)`,
+        [userId, staleIds]
+      );
+      result.expired = staleIds.length;
+    }
+
+    return result;
+  });
+}
+
+app.get(
+  "/recommendations",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    await generateRecommendations(userId, { refreshOpportunities: true });
+
+    const params = [userId];
+    let sql = `SELECT ${recommendationColumns()} FROM recommendations WHERE user_id = ?`;
+    if (req.query.status) {
+      sql += " AND status = ?";
+      params.push(req.query.status);
+    }
+    sql += ` ORDER BY ${recommendationOrderSql()}`;
+
+    const [rows] = await db.query(sql, params);
+    res.json(rows);
+  })
+);
 
 app.put(
   "/recommendations/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
     const { status } = req.body || {};
     const { id } = req.params;
+    const userId = getUserId(req);
 
     if (!status || !RECOMMENDATION_STATUSES.includes(status)) {
       return res.status(400).json({
@@ -3040,24 +3941,35 @@ app.put(
       });
     }
 
-    const [existing] = await db.query("SELECT * FROM recommendations WHERE recommendation_id = ?", [id]);
+    const [existing] = await db.query(
+      "SELECT recommendation_id FROM recommendations WHERE recommendation_id = ? AND user_id = ?",
+      [id, userId]
+    );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Recommendation not found" });
     }
 
-    await db.query("UPDATE recommendations SET status = ? WHERE recommendation_id = ?", [status, id]);
+    await db.query(
+      "UPDATE recommendations SET status = ? WHERE recommendation_id = ? AND user_id = ?",
+      [status, id, userId]
+    );
 
-    const [rows] = await db.query("SELECT * FROM recommendations WHERE recommendation_id = ?", [id]);
+    const [rows] = await db.query(
+      `SELECT ${recommendationColumns()} FROM recommendations WHERE recommendation_id = ? AND user_id = ?`,
+      [id, userId]
+    );
     res.json(rows[0]);
   })
 );
 
 app.delete(
   "/recommendations/:id",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const [result] = await db.query("DELETE FROM recommendations WHERE recommendation_id = ?", [
-      req.params.id,
-    ]);
+    const [result] = await db.query(
+      "DELETE FROM recommendations WHERE recommendation_id = ? AND user_id = ?",
+      [req.params.id, getUserId(req)]
+    );
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Recommendation not found" });
     }
@@ -3069,8 +3981,9 @@ app.delete(
 // useful for a clean before/after moment in a demo or test.
 app.post(
   "/recommendations/generate",
+  requireAuth,
   asyncHandler(async (req, res) => {
-    const result = await generateRecommendations();
+    const result = await generateRecommendations(getUserId(req), { refreshOpportunities: true });
     res.json(result);
   })
 );
@@ -3093,6 +4006,11 @@ app.use((req, res) => {
 // =======================================================================
 
 app.use((err, req, res, next) => {
+  // A malformed JSON request body is the client's mistake, not a server failure.
+  if (err.type === "entity.parse.failed") {
+    return res.status(400).json({ message: "Request body is not valid JSON." });
+  }
+
   console.error("DB/SERVER ERROR:", err);
   res.status(500).json({ message: err.sqlMessage || err.message || "Unexpected server error" });
 });

@@ -882,6 +882,10 @@ YOUTUBE LINK / SYNC (scheduled-item modal)
   min-height: 14px;
 }
 
+.youtube-link-error.success {
+  color: #2e6b2e;
+}
+
 
 /* =========================
 WRITING

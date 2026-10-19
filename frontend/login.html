@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Log in — ContentCreator</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        /* Small, page-local styles only — deliberately not touching
+           style.css so this change stays isolated to one new file. */
+        .auth-page {
+            max-width: 360px;
+            margin: 10vh auto;
+            padding: 2rem;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+        .auth-page h1 {
+            margin-top: 0;
+            font-size: 1.4rem;
+        }
+        .auth-page label {
+            display: block;
+            margin-top: 1rem;
+            font-size: 0.9rem;
+        }
+        .auth-page input {
+            width: 100%;
+            padding: 0.5rem;
+            margin-top: 0.25rem;
+            box-sizing: border-box;
+        }
+        .auth-page button {
+            margin-top: 1.5rem;
+            width: 100%;
+            padding: 0.6rem;
+            cursor: pointer;
+        }
+        .auth-page .switch-mode {
+            margin-top: 1rem;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+        .auth-page .switch-mode a {
+            cursor: pointer;
+        }
+        .auth-error {
+            margin-top: 1rem;
+            color: #b00020;
+            font-size: 0.85rem;
+        }
+        .auth-error.is-hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="auth-page">
+    <h1 id="authTitle">Log in</h1>
+
+    <form id="authForm">
+        <div id="registerOnlyFields">
+            <label for="email">Email
+                <input type="email" id="email" autocomplete="email">
+            </label>
+        </div>
+
+        <label for="username">Username
+            <input type="text" id="username" autocomplete="username" required>
+        </label>
+
+        <label for="password">Password
+            <input type="password" id="password" autocomplete="current-password" required minlength="8">
+        </label>
+
+        <button type="submit" id="authSubmit">Log in</button>
+
+        <div class="auth-error is-hidden" id="authError"></div>
+
+        <div class="switch-mode">
+            <span id="switchModePrompt">Don't have an account?</span>
+            <a id="switchModeLink">Register</a>
+        </div>
+    </form>
+</div>
+
+<script>
+const API_BASE = "http://localhost:3000";
+
+let mode = "login"; // or "register"
+
+const authForm = document.getElementById("authForm");
+const authTitle = document.getElementById("authTitle");
+const authSubmit = document.getElementById("authSubmit");
+const authError = document.getElementById("authError");
+const registerOnlyFields = document.getElementById("registerOnlyFields");
+const switchModePrompt = document.getElementById("switchModePrompt");
+const switchModeLink = document.getElementById("switchModeLink");
+
+function applyMode() {
+    if (mode === "login") {
+        authTitle.textContent = "Log in";
+        authSubmit.textContent = "Log in";
+        registerOnlyFields.style.display = "none";
+        document.getElementById("email").removeAttribute("required");
+        switchModePrompt.textContent = "Don't have an account?";
+        switchModeLink.textContent = "Register";
+    } else {
+        authTitle.textContent = "Register";
+        authSubmit.textContent = "Create account";
+        registerOnlyFields.style.display = "block";
+        document.getElementById("email").setAttribute("required", "required");
+        switchModePrompt.textContent = "Already have an account?";
+        switchModeLink.textContent = "Log in";
+    }
+    authError.classList.add("is-hidden");
+    authError.textContent = "";
+}
+
+switchModeLink.addEventListener("click", () => {
+    mode = mode === "login" ? "register" : "login";
+    applyMode();
+});
+
+// If already logged in, skip the form entirely.
+(async function redirectIfLoggedIn() {
+    try {
+        const res = await fetch(`${API_BASE}/auth/me`, { credentials: "include" });
+        if (res.ok) {
+            window.location.href = "dashboard.html";
+        }
+    } catch (err) {
+        // Not logged in / server unreachable — stay on the login page.
+    }
+})();
+
+authForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    authError.classList.add("is-hidden");
+    authError.textContent = "";
+
+    const username = document.getElementById("username").value.trim();
+    const password = document.getElementById("password").value;
+
+    const endpoint = mode === "login" ? "/auth/login" : "/auth/register";
+    const body = mode === "login"
+        ? { username, password }
+        : { username, password, email: document.getElementById("email").value.trim() };
+
+    authSubmit.disabled = true;
+    try {
+        const res = await fetch(`${API_BASE}${endpoint}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+            authError.textContent = data.message || "Something went wrong. Please try again.";
+            authError.classList.remove("is-hidden");
+            return;
+        }
+
+        window.location.href = "dashboard.html";
+    } catch (err) {
+        authError.textContent = "Could not reach the server. Is the backend running?";
+        authError.classList.remove("is-hidden");
+    } finally {
+        authSubmit.disabled = false;
+    }
+});
+
+applyMode();
+</script>
+
+</body>
+</html>

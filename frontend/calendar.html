@@ -6,10 +6,13 @@
     <title>Calendar</title>
     <link rel="stylesheet" href="style.css">
 </head>
+    <script src="auth-guard.js"></script>
 <body>
     <div class="parent-all">
     <div class="sidePanel">
         <h2>ContentCreator</h2>
+                <p id="loggedInAs" style="font-size:0.8rem;opacity:0.7;"></p>
+        <a href="#" id="logoutBtn" style="display:block;margin-bottom:0.5rem;">Log out</a>
         <ul>
         <li><a href="dashboard.html">
             Dashboard</a>
@@ -67,12 +70,12 @@
     </div>
     <div class="addEvent">
         <button id="openEvent">
-            + Add Event
+            + Schedule Event
         </button>
         <div class="event-sidebar">
 
 <div class="event-header">
-<h3 class="addEventTitle">Add Event</h3>
+<h3 class="addEventTitle">Schedule Content</h3>
 <button id="closeEvent">X</button>
 </div>
 <input id="eventTitle" placeholder="Title">
@@ -97,7 +100,7 @@
 
 </div>
 
-<button id="saveEvent">Save Event</button>
+<button id="saveEvent">Save</button>
 
 
 </div>
@@ -228,7 +231,7 @@
 
     </div>
     <script src="calendar.js"></script>
-
+    <script>wireLogoutButton();</script>
 
 </body>
 </html>

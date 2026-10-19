@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:3000";
+
 
 // ---- in-memory state -------------------------------------------------
 let summaryData = {};
@@ -100,7 +100,9 @@ async function loadAnalytics() {
             fetch(`${API_BASE}/analytics/consistency`),
             fetch(`${API_BASE}/analytics/consistency/by-platform`),
             fetch(`${API_BASE}/analytics/consistency/trend`),
-            fetch(`${API_BASE}/api/youtube/connection`),
+            fetch(`${API_BASE}/api/youtube/connection`, {
+                credentials: "include",
+            }),
         ]);
 
         summaryData = await expectOk(summaryRes, "Could not load the analytics summary.");
@@ -205,7 +207,10 @@ async function connectYouTubeChannel() {
     if (!input) return;
 
     const channelId = input.value.trim();
-    if (errorEl) errorEl.textContent = "";
+    if (errorEl) {
+        errorEl.textContent = "";
+        errorEl.classList.remove("success");
+    }
 
     if (!channelId) {
         if (errorEl) errorEl.textContent = "Paste a YouTube channel ID first.";
@@ -217,23 +222,55 @@ async function connectYouTubeChannel() {
         button.textContent = "Connecting…";
     }
 
+    if (errorEl) errorEl.textContent = "Checking that channel with YouTube…";
+
     try {
         const response = await fetch(`${API_BASE}/api/youtube/channel`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            credentials: "include",
             body: JSON.stringify({ channel_id: channelId }),
         });
 
         const body = await response.json().catch(() => ({}));
+
         if (!response.ok) {
-            throw new Error(body.message || "Could not connect that channel.");
+            throw new Error(
+                body.message ||
+                `Could not connect that channel (HTTP ${response.status}).`
+            );
         }
 
+        connectionData = body;
         input.value = "";
-        await loadAnalytics();
+
+        // Update the YouTube connection UI immediately.
+        renderConnectionStatus();
+
+        if (errorEl) {
+            errorEl.textContent =
+                body.message || "YouTube channel connected successfully.";
+            errorEl.classList.add("success");
+        }
+
+        // Refresh analytics independently. A failure in an unrelated
+        // analytics widget must not make a successful channel connection
+        // appear to have failed.
+        loadAnalytics().catch((error) => {
+            console.error(
+                "Analytics refresh after YouTube connection failed:",
+                error
+            );
+        });
     } catch (error) {
         console.error("YouTube channel connect error:", error);
-        if (errorEl) errorEl.textContent = error.message || "Could not connect that channel. Please try again.";
+
+        if (errorEl) {
+            errorEl.classList.remove("success");
+            errorEl.textContent =
+                error.message ||
+                "Could not connect that channel. Please try again.";
+        }
     } finally {
         if (button) {
             button.disabled = false;
@@ -262,7 +299,10 @@ async function disconnectYouTubeChannel() {
     if (button) button.disabled = true;
 
     try {
-        const response = await fetch(`${API_BASE}/api/youtube/channel`, { method: "DELETE" });
+        const response = await fetch(`${API_BASE}/api/youtube/channel`, {
+            method: "DELETE",
+            credentials: "include",
+        });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) {
             throw new Error(body.message || "Could not disconnect the channel.");
@@ -570,7 +610,9 @@ async function loadYoutubeConnectionStatus() {
     if (!badge) return;
 
     try {
-        const response = await fetch(`${API_BASE}/youtube/connection-status`);
+        const response = await fetch(`${API_BASE}/youtube/connection-status`, {
+            credentials: "include",
+        });
         if (!response.ok) throw new Error("Could not check YouTube connection status.");
         const data = await response.json();
 

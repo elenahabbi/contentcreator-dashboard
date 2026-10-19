@@ -6,12 +6,15 @@
     <title>Form</title>
     <link rel="stylesheet" href="style.css">
 </head>
+    <script src="auth-guard.js"></script>
 <body>
     
     
 <div class="parent-all">
     <div class="sidePanel">
         <h2>ContentCreator</h2>
+                <p id="loggedInAs" style="font-size:0.8rem;opacity:0.7;"></p>
+        <a href="#" id="logoutBtn" style="display:block;margin-bottom:0.5rem;">Log out</a>
         <ul>
         <li><a href="dashboard.html">
             Dashboard</a>
@@ -79,11 +82,8 @@
     </div>
 </div>
 
-
-
-
-    
     <script src="scripts.js" defer></script>
+    <script>wireLogoutButton();</script>
     
 
 </body>

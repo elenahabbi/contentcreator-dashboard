@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:3000";
+
 
 // ============================================
 // INIT
@@ -6,9 +6,11 @@ const API_BASE = "http://localhost:3000";
 
 document.addEventListener("DOMContentLoaded", () => {
     loadPostsConsistency();
-    loadDashboardSummary();
+        loadDashboardSummary();
     loadPlatformsForCompetitorForm();
     setupAddCompetitorForm();
+    loadEvents();
+    setupEventForm();
 });
 
 // ============================================
@@ -63,8 +65,9 @@ async function loadDashboardSummary() {
         renderUpcomingContent(data.upcomingContent);
         renderPlatformOverview(data.platforms);
         renderPerformanceSnapshot(data.latestPerformance);
-        renderOpportunities(data.opportunities);
+                renderOpportunities(data.opportunities);
         renderRecommendations(data.recommendations);
+        renderSectionErrors(data.sectionErrors);
         renderCompetitorCount(data.competitorsTracked);
     } catch (error) {
         console.error("Dashboard summary load error:", error);
@@ -184,15 +187,15 @@ function renderOpportunities(items) {
     list.innerHTML = items.map(item => `
         <li class="dashboard-opportunity-item">
             <div class="dashboard-opportunity-main">
-                <div class="dashboard-opportunity-title">${escapeHTML(item.title || "Untitled opportunity")}</div>
+                    <div class="dashboard-opportunity-title">${escapeHTML(item.title || "Untitled opportunity")}</div>
                 <div class="dashboard-opportunity-meta">
-                    Score ${formatScore(item.opportunity_score)}/100
+                    ${escapeHTML(String(item.opportunity_type || "Opportunity").replace(/([a-z])([A-Z])/g, "$1 $2"))}
+                    ${item.source ? `· ${escapeHTML(item.source)}` : ""}
                     ${item.opportunity_deadline ? `· Opportunity window closes ${formatDateTime(item.opportunity_deadline)}` : ""}
                 </div>
                 ${item.description ? `<div class="dashboard-opportunity-desc">${escapeHTML(item.description)}</div>` : ""}
             </div>
-            <div class="dashboard-item-actions">
-                <span class="impact-badge impact-badge--${escapeHTML((item.impact_level || "low").toLowerCase())}">${escapeHTML(item.impact_level || "Low")}</span>
+                        <div class="dashboard-item-actions">
                 <button class="quick-action-btn quick-action-btn--small" data-kind="opportunity" data-id="${item.opportunity_id}" data-status="Actioned">Mark Actioned</button>
                 <button class="quick-action-btn quick-action-btn--small" data-kind="opportunity" data-id="${item.opportunity_id}" data-status="Dismissed">Dismiss</button>
             </div>
@@ -227,6 +230,15 @@ function renderRecommendations(items) {
             </div>
         </li>
     `).join("");
+}
+
+// Optional sections (opportunities/recommendations) report their own
+// failures in sectionErrors so an empty list is never mistaken for
+// "nothing detected". The real error is in the server log.
+function renderSectionErrors(sectionErrors) {
+    if (!sectionErrors) return;
+    const messages = Object.values(sectionErrors).filter(Boolean);
+    if (messages.length > 0) showDashboardError(messages.join(" "));
 }
 
 // Shared click handler for both opportunity and recommendation action
@@ -396,6 +408,218 @@ function clearDashboardError() {
     if (!banner) return;
     banner.textContent = "";
     banner.classList.add("is-hidden");
+}
+
+
+// ============================================
+// CREATOR EVENTS  (GET/POST/PUT/DELETE /events)
+// An event is a date that matters to the creator's content (a holiday, a
+// conference, a series launch). It is NOT a scheduled post: those live on
+// the calendar page. Events are always loaded from the server, so they
+// survive a page refresh; nothing is kept only in browser state.
+// ============================================
+
+let creatorEvents = [];
+let eventRequestInFlight = false;
+
+// Calls the events API. Resolves with the parsed JSON body only when the
+// server really answered 2xx; otherwise throws an Error whose message is
+// safe to show. Server-side (5xx) messages can contain database details,
+// so they are replaced by a generic sentence here.
+async function eventApi(path, options = {}) {
+    const response = await fetch(`${API_BASE}${path}`, {
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        ...options,
+    });
+
+    let body = null;
+    try {
+        body = await response.json();
+    } catch (_) {
+        body = null;
+    }
+
+    if (!response.ok) {
+        if (response.status === 401) {
+            window.location.href = "login.html";
+            throw new Error("Please log in again.");
+        }
+        if (response.status >= 500) {
+            throw new Error("The server could not complete the request. Please try again.");
+        }
+        throw new Error((body && body.message) || `Request failed (HTTP ${response.status}).`);
+    }
+    return body;
+}
+
+// "2026-10-20" -> "Oct 20, 2026" (same style as the rest of the dashboard).
+// Parsed as a local calendar date so it never shifts by a day.
+function formatEventDate(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ""));
+    if (!match) return "—";
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    return date.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+
+function showEventElement(id, visible, message) {
+    const element = document.getElementById(id);
+    if (!element) return;
+    if (message !== undefined) element.textContent = message;
+    element.classList.toggle("is-hidden", !visible);
+}
+
+async function loadEvents() {
+    const list = document.getElementById("eventList");
+    if (!list) return;
+
+    showEventElement("eventLoading", true);
+    showEventElement("eventListError", false, "");
+
+    try {
+        const events = await eventApi("/events");
+        creatorEvents = Array.isArray(events) ? events : [];
+        renderEvents();
+    } catch (error) {
+        console.error("Events load error:", error);
+        creatorEvents = [];
+        list.innerHTML = "";
+        showEventElement("eventEmpty", false);
+        showEventElement("eventListError", true, `Could not load your events. ${error.message}`);
+    } finally {
+        showEventElement("eventLoading", false);
+    }
+}
+
+function renderEvents() {
+    const list = document.getElementById("eventList");
+    if (!list) return;
+
+    list.innerHTML = "";
+    showEventElement("eventEmpty", creatorEvents.length === 0);
+
+    creatorEvents.forEach((event) => {
+        const item = document.createElement("li");
+        item.className = "dashboard-opportunity-item";
+        if (event.timing === "Past") item.style.opacity = "0.6";
+
+        const timingLabel = event.timing && event.timing !== "Upcoming" ? ` · ${event.timing}` : "";
+
+        item.innerHTML = `
+            <div>
+                <div class="dashboard-opportunity-title">${escapeHTML(event.title)}</div>
+                <div class="dashboard-opportunity-meta">
+                    ${escapeHTML(formatEventDate(event.event_date))}${escapeHTML(timingLabel)}
+                    ${event.relevance_keywords ? `· Keywords: ${escapeHTML(event.relevance_keywords)}` : ""}
+                </div>
+                ${event.description ? `<div class="dashboard-opportunity-desc">${escapeHTML(event.description)}</div>` : ""}
+            </div>
+            <div class="dashboard-item-actions">
+                <button type="button" class="quick-action-btn quick-action-btn--small" data-event-action="edit" data-event-id="${event.event_id}">Edit</button>
+                <button type="button" class="quick-action-btn quick-action-btn--small" data-event-action="delete" data-event-id="${event.event_id}">Delete</button>
+            </div>
+        `;
+        list.appendChild(item);
+    });
+}
+
+function resetEventForm() {
+    const form = document.getElementById("eventForm");
+    if (form) form.reset();
+    document.getElementById("eventEditId").value = "";
+    document.getElementById("eventSubmitBtn").textContent = "+ Add Event";
+    showEventElement("eventCancelEditBtn", false);
+    showEventElement("eventFormError", false, "");
+}
+
+function startEditingEvent(eventId) {
+    const event = creatorEvents.find((e) => String(e.event_id) === String(eventId));
+    if (!event) return;
+
+    document.getElementById("eventEditId").value = event.event_id;
+    document.getElementById("eventTitleInput").value = event.title || "";
+    document.getElementById("eventDateInput").value = String(event.event_date || "").slice(0, 10);
+    document.getElementById("eventKeywordsInput").value = event.relevance_keywords || "";
+    document.getElementById("eventDescriptionInput").value = event.description || "";
+    document.getElementById("eventSubmitBtn").textContent = "Save Changes";
+    showEventElement("eventCancelEditBtn", true);
+    showEventElement("eventFormError", false, "");
+    document.getElementById("eventForm").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function deleteEvent(eventId) {
+    if (eventRequestInFlight) return;
+    if (!window.confirm("Delete this event? This cannot be undone.")) return;
+
+    eventRequestInFlight = true;
+    showEventElement("eventListError", false, "");
+    try {
+        await eventApi(`/events/${encodeURIComponent(eventId)}`, { method: "DELETE" });
+        if (document.getElementById("eventEditId").value === String(eventId)) resetEventForm();
+        await loadEvents();
+        loadDashboardSummary(); // opportunities derived from this event expire on the next detection run
+    } catch (error) {
+        console.error("Event delete error:", error);
+        showEventElement("eventListError", true, `Could not delete the event. ${error.message}`);
+    } finally {
+        eventRequestInFlight = false;
+    }
+}
+
+function setupEventForm() {
+    const form = document.getElementById("eventForm");
+    const list = document.getElementById("eventList");
+    if (!form || !list) return;
+
+    form.addEventListener("submit", async (submitEvent) => {
+        submitEvent.preventDefault();
+        if (eventRequestInFlight) return; // ignore repeated clicks while a request is running
+
+        const editId = document.getElementById("eventEditId").value;
+        const submitBtn = document.getElementById("eventSubmitBtn");
+        const payload = {
+            title: document.getElementById("eventTitleInput").value.trim(),
+            event_date: document.getElementById("eventDateInput").value,
+            relevance_keywords: document.getElementById("eventKeywordsInput").value.trim() || null,
+            description: document.getElementById("eventDescriptionInput").value.trim() || null,
+        };
+
+        // Quick feedback only; the server validates everything again.
+        if (!payload.title || !payload.event_date) {
+            showEventElement("eventFormError", true, "Please enter an event title and date.");
+            return;
+        }
+
+        eventRequestInFlight = true;
+        submitBtn.disabled = true;
+        showEventElement("eventFormError", false, "");
+
+        try {
+            await eventApi(editId ? `/events/${encodeURIComponent(editId)}` : "/events", {
+                method: editId ? "PUT" : "POST",
+                body: JSON.stringify(payload),
+            });
+            resetEventForm();
+            await loadEvents();
+            loadDashboardSummary(); // refresh opportunities/recommendations that depend on events
+        } catch (error) {
+            console.error("Event save error:", error);
+            showEventElement("eventFormError", true, error.message);
+        } finally {
+            eventRequestInFlight = false;
+            submitBtn.disabled = false;
+        }
+    });
+
+    document.getElementById("eventCancelEditBtn").addEventListener("click", resetEventForm);
+
+    list.addEventListener("click", (clickEvent) => {
+        const button = clickEvent.target.closest("[data-event-action]");
+        if (!button) return;
+        const eventId = button.dataset.eventId;
+        if (button.dataset.eventAction === "edit") startEditingEvent(eventId);
+        if (button.dataset.eventAction === "delete") deleteEvent(eventId);
+    });
 }
 
 // ============================================

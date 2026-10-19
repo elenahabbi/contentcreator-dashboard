@@ -338,6 +338,43 @@ async function getChannelStatistics(channelId) {
   };
 }
 
+
+/**
+ * Searches recent public YouTube videos for a creator-selected topic.
+ *
+ * This deliberately uses the existing Data API key path and returns only
+ * simple topic/title/date information needed by the opportunity engine.
+ * It does not scrape YouTube, track competitors, or predict performance.
+ */
+async function searchPublicVideosByTopic(query, { maxResults = 5 } = {}) {
+  const trimmedQuery = String(query || "").trim();
+  if (!trimmedQuery) {
+    throw new YouTubeServiceError("A topic is required for YouTube search.", {
+      status: 400,
+      code: "MISSING_TOPIC",
+    });
+  }
+
+  const cappedMaxResults = Math.min(Math.max(Number(maxResults) || 5, 1), 25);
+  const data = await callYouTubeApi(
+    `/search?part=snippet&type=video&order=date&maxResults=${cappedMaxResults}` +
+      `&q=${encodeURIComponent(trimmedQuery)}`
+  );
+
+  return (Array.isArray(data.items) ? data.items : [])
+    .filter((item) => item.id && item.id.videoId)
+    .map((item) => ({
+      videoId: item.id.videoId,
+      title: decodeHtmlEntities(item.snippet?.title || ""),
+      publishedAt: item.snippet?.publishedAt || null,
+      channelTitle: decodeHtmlEntities(item.snippet?.channelTitle || ""),
+      thumbnailUrl:
+        item.snippet?.thumbnails?.medium?.url ||
+        item.snippet?.thumbnails?.default?.url ||
+        null,
+    }));
+}
+
 module.exports = {
   YouTubeServiceError,
   extractVideoId,
@@ -345,4 +382,5 @@ module.exports = {
   getChannelStatistics,
   getMyChannelId,
   searchChannelVideosByTitle,
+  searchPublicVideosByTopic,
 };

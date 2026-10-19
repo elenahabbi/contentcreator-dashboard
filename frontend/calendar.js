@@ -294,7 +294,7 @@ async function saveScheduledContent() {
     }
 
     if (new Date(date) < new Date(today)) {
-        alert("You cannot create events in the past.");
+        alert("You cannot schedule content in the past.");
         return;
     }
 
@@ -351,7 +351,7 @@ async function saveScheduledContent() {
             throw new Error(message);
         }
 
-        alert("Event saved!");
+        alert("Scheduled content saved!");
         sidebar.classList.remove("active");
         document.getElementById("eventTitle").value = "";
         document.getElementById("eventDate").value = "";
