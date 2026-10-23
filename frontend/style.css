@@ -1178,7 +1178,7 @@ DASHBOARD OVERVIEW
 /* ---- Summary cards (Total / Draft / Scheduled / Published / Consistency) ---- */
 .dashboard-summary-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -1188,6 +1188,8 @@ DASHBOARD OVERVIEW
   padding: 18px;
   min-height: 92px;
   box-sizing: border-box;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .dashboard-metric-label {
@@ -1214,6 +1216,7 @@ DASHBOARD OVERVIEW
   border: 1px solid #98989d;
   padding: 18px;
   min-width: 0;
+  overflow-wrap: anywhere;
   border-radius: 8px;
 }
 
@@ -1230,9 +1233,9 @@ DASHBOARD OVERVIEW
 
 .dashboard-main-grid {
   display: grid;
-  grid-template-columns: 1.4fr 1fr;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 /* ---- Upcoming content list ---- */

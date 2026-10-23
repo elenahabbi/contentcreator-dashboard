@@ -16,29 +16,36 @@
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
 --
--- Table structure for table `platforms`
+-- Table structure for table `competitors`
 --
 
-DROP TABLE IF EXISTS `platforms`;
+DROP TABLE IF EXISTS `competitors`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
-CREATE TABLE `platforms` (
-  `platform_id` int(11) NOT NULL AUTO_INCREMENT,
-  `platform_name` varchar(50) NOT NULL,
-  `is_active` tinyint(1) NOT NULL DEFAULT 1,
-  PRIMARY KEY (`platform_id`),
-  UNIQUE KEY `platform_name` (`platform_name`)
-) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+CREATE TABLE `competitors` (
+  `competitor_id` int(11) NOT NULL AUTO_INCREMENT,
+  `user_id` int(11) NOT NULL,
+  `name` varchar(150) NOT NULL,
+  `platform_id` int(11) NOT NULL,
+  `profile_url` varchar(500) DEFAULT NULL,
+  `category` varchar(100) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`competitor_id`),
+  KEY `user_id` (`user_id`),
+  KEY `platform_id` (`platform_id`),
+  CONSTRAINT `competitors_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE,
+  CONSTRAINT `competitors_ibfk_2` FOREIGN KEY (`platform_id`) REFERENCES `platforms` (`platform_id`) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
--- Dumping data for table `platforms`
+-- Dumping data for table `competitors`
 --
 
-LOCK TABLES `platforms` WRITE;
-/*!40000 ALTER TABLE `platforms` DISABLE KEYS */;
-INSERT INTO `platforms` VALUES (1,'YouTube',1),(2,'TikTok',1),(3,'Instagram',1);
-/*!40000 ALTER TABLE `platforms` ENABLE KEYS */;
+LOCK TABLES `competitors` WRITE;
+/*!40000 ALTER TABLE `competitors` DISABLE KEYS */;
+INSERT INTO `competitors` VALUES (1,1,'Deborah B',1,'https://www.youtube.com/@deborahbx_',NULL,'2026-09-10 15:24:25');
+/*!40000 ALTER TABLE `competitors` ENABLE KEYS */;
 UNLOCK TABLES;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -50,4 +57,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-10-19 14:29:25
+-- Dump completed on 2026-10-23 13:07:37

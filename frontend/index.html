@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome | ContentCreator</title>
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Welcome-page-only styles. Reuses the app's existing palette
+         (cream #fff6ee, charcoal #313135, muted #7a6f6f, border #98989d)
+         and its outlined-button look; style.css itself is not touched.
+         This page is public: it loads no auth-guard.js and makes no API
+         calls. Sign In goes to the existing login.html. -->
+    <style>
+        .welcome-topbar {
+            background: #313135;
+            color: #fff6ee;
+            padding: 16px 24px;
+        }
+
+        .welcome-topbar strong {
+            font-size: 20px;
+        }
+
+        .welcome-page {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 48px 24px 32px;
+        }
+
+        .welcome-hero {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        .welcome-hero h1 {
+            font-size: 34px;
+            line-height: 1.2;
+            margin: 0 0 14px;
+        }
+
+        .welcome-hero p {
+            max-width: 600px;
+            margin: 0 auto 26px;
+            color: #7a6f6f;
+            font-size: 16px;
+            line-height: 1.5;
+        }
+
+        .welcome-actions {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .welcome-btn {
+            display: inline-block;
+            padding: 12px 24px;
+            border: 1.5px solid #313135;
+            border-radius: 8px;
+            color: #313135;
+            background: transparent;
+            font-size: 15px;
+            text-decoration: none;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        .welcome-btn:hover,
+        .welcome-btn:focus-visible {
+            background: #313135;
+            color: #fff6ee;
+        }
+
+        .welcome-btn--primary {
+            background: #313135;
+            color: #fff6ee;
+        }
+
+        .welcome-btn--primary:hover,
+        .welcome-btn--primary:focus-visible {
+            background: transparent;
+            color: #313135;
+        }
+
+        .welcome-btn:focus-visible {
+            outline: 3px solid #8D93CB;
+            outline-offset: 2px;
+        }
+
+        .welcome-features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 16px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .welcome-feature {
+            background: #fff6ee;
+            border: 1px solid #98989d;
+            border-radius: 8px;
+            padding: 18px;
+            cursor: default;
+        }
+
+        .welcome-feature:hover {
+            opacity: 1;
+        }
+
+        .welcome-feature h2 {
+            margin: 0 0 6px;
+            font-size: 17px;
+        }
+
+        .welcome-feature p {
+            margin: 0;
+            color: #7a6f6f;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .welcome-footnote {
+            margin-top: 32px;
+            text-align: center;
+            color: #7a6f6f;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+
+<header class="welcome-topbar">
+    <strong>ContentCreator</strong>
+</header>
+
+<main class="welcome-page">
+    <section class="welcome-hero">
+        <h1>Plan it. Publish it. See how it's going.</h1>
+        <p>
+            ContentCreator is a dashboard for creators. Keep your scripts and
+            schedule in one place, check how your content is performing, and
+            stay on top of your own posting habits.
+        </p>
+        <div class="welcome-actions">
+            <a class="welcome-btn welcome-btn--primary" href="login.html">Sign In</a>
+            <a class="welcome-btn" href="tutorial.html">Mini Tutorial</a>
+        </div>
+    </section>
+
+    <ul class="welcome-features">
+        <li class="welcome-feature">
+            <h2>Plan content</h2>
+            <p>Write and organise scripts, and track each one from draft to filmed to posted.</p>
+        </li>
+        <li class="welcome-feature">
+            <h2>Manage your schedule</h2>
+            <p>Schedule posts for YouTube, TikTok and Instagram on a calendar and mark them published.</p>
+        </li>
+        <li class="welcome-feature">
+            <h2>Monitor performance</h2>
+            <p>See YouTube performance, how many scheduled posts you actually published, and progress toward your own posting goal.</p>
+        </li>
+        <li class="welcome-feature">
+            <h2>Discover opportunities</h2>
+            <p>Get missed-opportunity alerts and recommendations you can act on or dismiss.</p>
+        </li>
+    </ul>
+
+    <p class="welcome-footnote">
+        New here? The Sign In page lets you create an account. Not sure where to start?
+        The <a href="tutorial.html">Mini Tutorial</a> needs no account.
+    </p>
+</main>
+
+</body>
+</html>

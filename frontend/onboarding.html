@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Set up your creator profile — ContentCreator</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="auth-guard.js"></script>
+    <style>
+        /* Page-local styles only; style.css is not modified. */
+        .onboard-page { max-width: 520px; margin: 6vh auto; padding: 2rem; border: 1px solid #ddd; border-radius: 8px; }
+        .onboard-page h1 { margin-top: 0; font-size: 1.4rem; }
+        .onboard-page label { display: block; margin-top: 1rem; font-size: 0.9rem; }
+        .onboard-page input, .onboard-page textarea { width: 100%; padding: 0.5rem; margin-top: 0.25rem; box-sizing: border-box; font: inherit; }
+        .onboard-page button { padding: 0.5rem 0.9rem; cursor: pointer; }
+        .topic-row { display: flex; gap: 0.5rem; align-items: flex-end; }
+        .topic-row label { flex: 1; margin-top: 1rem; }
+        .topic-chips { list-style: none; padding: 0; margin: 0.75rem 0 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+        .topic-chips li { border: 1px solid #ccc; border-radius: 999px; padding: 0.2rem 0.3rem 0.2rem 0.75rem; display: inline-flex; align-items: center; gap: 0.35rem; }
+        .topic-chips button { border: 0; background: transparent; padding: 0 0.4rem; font-size: 1rem; line-height: 1; }
+        .onboard-msg { margin-top: 1rem; font-size: 0.85rem; min-height: 1.2em; }
+        .onboard-msg.error { color: #b00020; }
+        .onboard-msg.ok { color: #1b6e2d; }
+        #finishBtn { margin-top: 1.5rem; width: 100%; padding: 0.6rem; }
+    </style>
+</head>
+<body>
+<div class="onboard-page">
+    <h1 id="pageTitle">Set up your creator profile</h1>
+    <p id="pageIntro">Tell us a little about your content. You can change this later.</p>
+
+    <div id="loadError" class="onboard-msg error is-hidden" role="alert">
+        <span id="loadErrorText"></span>
+        <button type="button" id="retryBtn">Retry</button>
+    </div>
+
+    <div id="formArea" class="is-hidden">
+        <label for="displayName">Display name *
+            <input type="text" id="displayName" maxlength="100" autocomplete="nickname">
+        </label>
+        <label for="primaryNiche">Primary niche
+            <input type="text" id="primaryNiche" maxlength="100" placeholder="e.g. Faith and personal growth">
+        </label>
+        <label for="bio">Short bio
+            <textarea id="bio" rows="3" maxlength="500"></textarea>
+        </label>
+
+        <div class="topic-row">
+            <label for="topicInput">Content topics * (add at least one)
+                <input type="text" id="topicInput" maxlength="60" placeholder="e.g. Bible study">
+            </label>
+            <button type="button" id="addTopicBtn">Add</button>
+        </div>
+        <ul class="topic-chips" id="topicList" aria-label="Your topics"></ul>
+
+        <div id="message" class="onboard-msg" role="status"></div>
+        <button type="button" id="finishBtn">Finish setup</button>
+    </div>
+</div>
+<script src="onboarding.js"></script>
+</body>
+</html>

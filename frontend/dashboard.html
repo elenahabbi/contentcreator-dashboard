@@ -5,6 +5,38 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard</title>
     <link rel="stylesheet" href="style.css">
+    <!-- Same Chart.js build already used by analytics.html (no new package). -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+    <script src="chart-fallback.js"></script>
+    <style>
+        /* Dashboard graphs (Phase 3). Reuses the app palette. */
+        .dashboard-chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            align-items: stretch;
+        }
+
+        .dashboard-chart-wrap {
+            position: relative;
+            width: 100%;
+            height: 220px;
+        }
+
+        .dashboard-chart-empty {
+            padding: 30px 10px;
+            text-align: center;
+            color: #7a6f6f;
+            font-size: 13px;
+        }
+
+        .dashboard-chart-caption {
+            margin-top: 10px;
+            color: #7a6f6f;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+    </style>
 </head>
     <script src="auth-guard.js"></script>
 <body>
@@ -66,10 +98,34 @@
                 <!-- Existing real, working KPI — left as-is (still backed by
                      GET /analytics/consistency, same element IDs, same JS). -->
                 <div class="dashboard-summary-card" id="postsConsistencyCard">
-                    <div class="dashboard-metric-label">Posting Consistency</div>
+                    <div class="dashboard-metric-label">Schedule Adherence</div>
                     <div class="dashboard-metric-value" id="postsConsistencyValue">—</div>
                     <div class="dashboard-summary-sub" id="postsConsistencySub">Loading…</div>
                 </div>
+            </div>
+
+            <!-- DASHBOARD GRAPHS (Phase 3): both use existing authenticated endpoints.
+                 Goal: GET /posting-goal.  Published vs missed: GET /analytics/consistency. -->
+            <div class="dashboard-chart-grid">
+                <section class="dashboard-card">
+                    <h3>Posting Goal Progress</h3>
+                    <p id="goalChartSubtitle">Published posts compared with your own posting target.</p>
+                    <div class="dashboard-chart-wrap is-hidden" id="goalChartWrap">
+                        <canvas id="goalProgressChart" role="img" aria-label="Posting goal progress chart"></canvas>
+                    </div>
+                    <div id="goalChartEmpty" class="dashboard-chart-empty">Loading…</div>
+                    <div class="dashboard-chart-caption" id="goalChartCaption"></div>
+                </section>
+
+                <section class="dashboard-card">
+                    <h3>Published vs Missed Scheduled Posts</h3>
+                    <p>All time. Only scheduled posts whose date has passed are counted; future and cancelled posts are excluded.</p>
+                    <div class="dashboard-chart-wrap is-hidden" id="publishedMissedWrap">
+                        <canvas id="publishedMissedChart" role="img" aria-label="Published versus missed scheduled posts chart"></canvas>
+                    </div>
+                    <div id="publishedMissedEmpty" class="dashboard-chart-empty">Loading…</div>
+                    <div class="dashboard-chart-caption" id="publishedMissedCaption"></div>
+                </section>
             </div>
 
             <!-- UPCOMING CONTENT + PLATFORM OVERVIEW -->
@@ -152,75 +208,14 @@
                 </section>
             </div>
 
-                        <!-- CREATOR EVENTS -->
-            <section class="dashboard-card">
-                <h3>Creator Events</h3>
-                <p>Dates that matter to your content, such as holidays, conferences or series launches. These are separate from scheduled posts on the calendar. An event only becomes an opportunity when its title, description or keywords mention one of your content topics.</p>
-
-                <div id="eventLoading" class="empty-state">Loading events...</div>
-                <div id="eventListError" class="dashboard-error is-hidden"></div>
-                <ul class="dashboard-opportunity-list" id="eventList"></ul>
-                <div id="eventEmpty" class="empty-state is-hidden">
-                    No events yet. Add one below.
-                </div>
-
-                <form id="eventForm" class="dashboard-inline-form" novalidate>
-                    <input type="hidden" id="eventEditId">
-                    <input type="text" id="eventTitleInput" placeholder="Event title" maxlength="200" required>
-                    <input type="date" id="eventDateInput" required>
-                    <input type="text" id="eventKeywordsInput" placeholder="Keywords, comma-separated (optional)" maxlength="1000">
-                    <input type="text" id="eventDescriptionInput" placeholder="Description (optional)" maxlength="2000">
-                    <button type="submit" class="quick-action-btn" id="eventSubmitBtn">+ Add Event</button>
-                    <button type="button" class="quick-action-btn is-hidden" id="eventCancelEditBtn">Cancel</button>
-                </form>
-                <div id="eventFormError" class="dashboard-error is-hidden"></div>
-            </section>
             
-            <!-- COMPETITORS -->
-            <section class="dashboard-card">
-                <h3>Competitors Tracked (<span id="competitorCount">0</span>)</h3>
-                <p>Manually recorded from publicly visible posts — nothing here is scraped or fabricated.</p>
-
-                <ul class="dashboard-competitor-list" id="competitorList"></ul>
-                <div id="competitorEmpty" class="empty-state is-hidden">
-                    No competitors added yet. Add one below so opportunity detection has something to compare against.
-                </div>
-
-                <form id="addCompetitorForm" class="dashboard-inline-form">
-                    <input type="text" id="competitorName" placeholder="Competitor name" required>
-                    <select id="competitorPlatform" required>
-                        <option value="" disabled selected>Platform</option>
-                    </select>
-                    <input type="url" id="competitorUrl" placeholder="Profile URL (optional)">
-                    <button type="submit" class="quick-action-btn">+ Add Competitor</button>
-                </form>
-                <div id="competitorFormError" class="dashboard-error is-hidden"></div>
-
-                <h4>Log Competitor Content</h4>
-                <p>Record a public post so it can be checked against your own categories for missed-opportunity detection.</p>
-                <form id="addCompetitorContentForm" class="dashboard-inline-form">
-                    <select id="competitorContentCompetitor" required>
-                        <option value="" disabled selected>Competitor</option>
-                    </select>
-                    <input type="text" id="competitorContentTitle" placeholder="Post title" required>
-                    <input type="text" id="competitorContentTopic" placeholder="Topic (e.g. Faith, Technology)" required>
-                    <input type="date" id="competitorContentPublishedAt" required>
-                    <input type="number" id="competitorContentViews" placeholder="Views" min="0">
-                    <input type="number" id="competitorContentLikes" placeholder="Likes" min="0">
-                    <input type="number" id="competitorContentComments" placeholder="Comments" min="0">
-                    <input type="number" id="competitorContentShares" placeholder="Shares" min="0">
-                    <input type="url" id="competitorContentUrl" placeholder="Source URL (optional)">
-                    <button type="submit" class="quick-action-btn">+ Log Content</button>
-                </form>
-                <div id="competitorContentFormError" class="dashboard-error is-hidden"></div>
-            </section>
-
             <!-- QUICK ACTIONS -->
             <section class="dashboard-card">
                 <h3>Quick Actions</h3>
                 <div class="dashboard-quick-actions">
                     <a class="quick-action-btn" href="write.html">+ Create Script</a>
                     <a class="quick-action-btn" href="calendar.html">View Content Planner</a>
+                    <a class="quick-action-btn" href="calendar.html?schedule=1">Schedule Event</a>
                     <a class="quick-action-btn" href="analytics.html">Sync Analytics</a>
                 </div>
             </section>

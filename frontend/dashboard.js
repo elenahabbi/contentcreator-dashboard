@@ -1,11 +1,10 @@
+// ---- dashboard.js: replace the existing INIT block ----
+document.addEventListener("DOMContentLoaded", async () => {
+    const redirected = await redirectIfOnboardingIncomplete();
+    if (redirected) return;
 
-
-// ============================================
-// INIT
-// ============================================
-
-document.addEventListener("DOMContentLoaded", () => {
     loadPostsConsistency();
+    loadGoalChart();
         loadDashboardSummary();
     loadPlatformsForCompetitorForm();
     setupAddCompetitorForm();
@@ -13,9 +12,38 @@ document.addEventListener("DOMContentLoaded", () => {
     setupEventForm();
 });
 
+// ---- dashboard.js: add this function directly below the INIT block ----
+// Redirects to onboarding ONLY when the server answers 200 and says setup is
+// incomplete. Any failure (network, 5xx, missing table) leaves the dashboard
+// usable and shows a small notice, so there is no redirect loop and no lockout.
+async function redirectIfOnboardingIncomplete() {
+    try {
+        const ok = await window.authReady;
+        if (!ok) return false;
+
+        const res = await fetch(`${API_BASE}/profile`, { credentials: "include" });
+        if (!res.ok) throw new Error(`profile status ${res.status}`);
+
+        const data = await res.json();
+        if (data.onboarding_completed === false) {
+            window.location.replace("onboarding.html");
+            return true;
+        }
+    } catch (error) {
+        console.warn("Could not check profile setup:", error.message);
+        const note = document.createElement("div");
+        note.setAttribute("role", "status");
+        note.style.cssText = "padding:8px 12px;background:#fff6e5;color:#4e1e17;font-size:13px;";
+        note.textContent = "We couldn't check your profile setup right now. The dashboard is still available.";
+        document.body.prepend(note);
+    }
+    return false;
+}
+
 // ============================================
-// POSTING CONSISTENCY (existing, unchanged)
-// Small posting-consistency KPI (Posts card). Kept intentionally minimal —
+// SCHEDULE ADHERENCE (formerly labelled "Posting Consistency")
+// Of scheduled posts that were due, the share that were published.
+// Small KPI (Posts card). Kept intentionally minimal —
 // full breakdown/trend/platform detail lives on the Analytics page.
 // ============================================
 
@@ -29,6 +57,10 @@ async function loadPostsConsistency() {
         if (!response.ok) throw new Error("Request failed");
         const data = await response.json();
 
+        // Phase 3: same response also feeds the Published vs Missed graph.
+        // Self-contained (own try/catch) so a chart problem can't affect the KPI.
+        renderPublishedMissedChart(data);
+
         if (!data.eligibleContent) {
             valueEl.textContent = "—";
             subEl.textContent = "No completed publishing deadlines yet.";
@@ -38,9 +70,299 @@ async function loadPostsConsistency() {
         valueEl.textContent = `${data.consistencyPercentage}%`;
         subEl.textContent = `${data.missedCount} missed post${data.missedCount === 1 ? "" : "s"}`;
     } catch (error) {
-        console.error("Could not load posting consistency:", error);
+        console.error("Could not load schedule adherence:", error);
         valueEl.textContent = "—";
-        subEl.textContent = "Could not load posting consistency.";
+        subEl.textContent = "Could not load schedule adherence.";
+        showChartMessage("publishedMissed", "Could not load scheduled post results right now. Try refreshing the page.");
+    }
+}
+
+// ============================================
+// DASHBOARD GRAPHS (Phase 3)
+// Chart.js is loaded from the same CDN build as analytics.html. Every
+// chart is destroyed before it is redrawn, and on page hide, so a refresh
+// or a revisit (back/forward cache) never leaves two charts on one canvas.
+// Unavailable data is never drawn as zero: each graph shows an explanatory
+// message instead.
+// ============================================
+
+const DASH_CHART_COLORS = {
+    published: "#8D93CB",
+    target: "#98989d",
+    missed: "#d98c7a",
+    grid: "#f0e1d4",
+    text: "#7a6f6f",
+};
+
+let goalProgressChart = null;
+let publishedMissedChart = null;
+let goalChartRequestId = 0;
+
+function destroyDashboardCharts() {
+    if (goalProgressChart) {
+        goalProgressChart.destroy();
+        goalProgressChart = null;
+    }
+    if (publishedMissedChart) {
+        publishedMissedChart.destroy();
+        publishedMissedChart = null;
+    }
+}
+
+window.addEventListener("pagehide", destroyDashboardCharts);
+
+// Destroys any chart already bound to the canvas, including one this file
+// lost track of, before a new one is created.
+function clearCanvasChart(canvas) {
+    if (typeof Chart === "undefined" || !canvas) return;
+    const existing = Chart.getChart(canvas);
+    if (existing) existing.destroy();
+}
+
+// key is "goal" or "publishedMissed" (matches the element IDs in dashboard.html).
+function chartElements(key) {
+    if (key === "goal") {
+        return {
+            wrap: document.getElementById("goalChartWrap"),
+            canvas: document.getElementById("goalProgressChart"),
+            empty: document.getElementById("goalChartEmpty"),
+            caption: document.getElementById("goalChartCaption"),
+        };
+    }
+    return {
+        wrap: document.getElementById("publishedMissedWrap"),
+        canvas: document.getElementById("publishedMissedChart"),
+        empty: document.getElementById("publishedMissedEmpty"),
+        caption: document.getElementById("publishedMissedCaption"),
+    };
+}
+
+function showChartMessage(key, message) {
+    const el = chartElements(key);
+    if (key === "goal" && goalProgressChart) {
+        goalProgressChart.destroy();
+        goalProgressChart = null;
+    }
+    if (key !== "goal" && publishedMissedChart) {
+        publishedMissedChart.destroy();
+        publishedMissedChart = null;
+    }
+    clearCanvasChart(el.canvas);
+    if (el.wrap) el.wrap.classList.add("is-hidden");
+    if (el.caption) el.caption.textContent = "";
+    if (el.empty) {
+        el.empty.textContent = message;
+        el.empty.classList.remove("is-hidden");
+    }
+}
+
+function showChartCanvas(key) {
+    const el = chartElements(key);
+    if (el.wrap) el.wrap.classList.remove("is-hidden");
+    if (el.empty) el.empty.classList.add("is-hidden");
+}
+
+function chartLibraryMissing(key) {
+    if (typeof Chart !== "undefined") return false;
+    showChartMessage(key, "Could not load the chart library. Try refreshing the page.");
+    return true;
+}
+
+// ---- Posting Goal Progress (GET /posting-goal) ----
+
+async function loadGoalChart() {
+    const requestId = ++goalChartRequestId;
+
+    try {
+        const response = await fetch(`${API_BASE}/posting-goal`, { credentials: "include" });
+
+        if (response.status === 503) {
+            const body = await response.json().catch(() => ({}));
+            if (requestId !== goalChartRequestId) return;
+            if (body.code === "POSTING_GOAL_SCHEMA_MISSING") {
+                showChartMessage("goal", "Posting goals need a one-time database setup that hasn't been run yet, so progress can't be shown.");
+                return;
+            }
+        }
+        if (!response.ok) throw new Error("Request failed");
+
+        const data = await response.json();
+        if (requestId !== goalChartRequestId) return; // a newer request superseded this one
+        renderGoalChart(data);
+    } catch (error) {
+        if (requestId !== goalChartRequestId) return;
+        console.error("Could not load posting goal chart:", error);
+        showChartMessage("goal", "Could not load your posting goal right now. Try refreshing the page.");
+    }
+}
+
+function describeGoalForChart(goal) {
+    if (goal.goal_type === "daily") return "Daily posting (1 post per day)";
+    const count = Number(goal.target_count);
+    const text = `${formatNumber(count)} post${count === 1 ? "" : "s"} per ${goal.period}`;
+    return goal.goal_type === "custom" ? `${text} (custom)` : text;
+}
+
+function renderGoalChart(data) {
+    try {
+        const goal = data && data.goal ? data.goal : null;
+        const progress = data && data.progress ? data.progress : null;
+
+        if (!goal || !progress) {
+            showChartMessage("goal", "No posting goal set yet. Set one on the Analytics page to see your progress here.");
+            return;
+        }
+
+        const published = Number(progress.published_count);
+        const target = Number(progress.target_count);
+        if (!Number.isFinite(published) || !Number.isFinite(target) || target < 1) {
+            showChartMessage("goal", "Your posting goal progress isn't available right now.");
+            return;
+        }
+        if (chartLibraryMissing("goal")) return;
+
+        const windowLabel = progress.window_label || "in this period";
+        const el = chartElements("goal");
+        showChartCanvas("goal");
+
+        setText("goalChartSubtitle", `Published posts compared with your target, ${windowLabel}.`);
+        if (el.caption) {
+            el.caption.textContent =
+                `${formatNumber(published)} of ${formatNumber(target)} post${target === 1 ? "" : "s"} published ${windowLabel} ` +
+                `(${progress.percentage}%). Goal: ${describeGoalForChart(goal)}.` +
+                (published >= target ? " Goal reached." : "");
+        }
+        if (el.canvas) {
+            el.canvas.setAttribute(
+                "aria-label",
+                `Posting goal: ${published} of ${target} posts published ${windowLabel}.`
+            );
+        }
+
+        if (goalProgressChart) {
+            goalProgressChart.destroy();
+            goalProgressChart = null;
+        }
+        clearCanvasChart(el.canvas);
+
+        goalProgressChart = new Chart(el.canvas.getContext("2d"), {
+            type: "bar",
+            data: {
+                labels: [`Published ${windowLabel}`, "Target"],
+                datasets: [{
+                    data: [published, target],
+                    backgroundColor: [DASH_CHART_COLORS.published, DASH_CHART_COLORS.target],
+                    borderRadius: 4,
+                }],
+            },
+            options: {
+                indexAxis: "y",
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${formatNumber(ctx.parsed.x)} post${ctx.parsed.x === 1 ? "" : "s"}`,
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        beginAtZero: true,
+                        suggestedMax: Math.max(published, target),
+                        grid: { color: DASH_CHART_COLORS.grid },
+                        ticks: { color: DASH_CHART_COLORS.text, precision: 0 },
+                        title: { display: true, text: "Posts", color: DASH_CHART_COLORS.text },
+                    },
+                    y: {
+                        grid: { display: false },
+                        ticks: { color: DASH_CHART_COLORS.text },
+                    },
+                },
+            },
+        });
+    } catch (error) {
+        console.error("Could not draw posting goal chart:", error);
+        showChartMessage("goal", "Could not draw the posting goal chart.");
+    }
+}
+
+// ---- Published vs Missed (data from GET /analytics/consistency) ----
+
+function renderPublishedMissedChart(data) {
+    try {
+        const published = Number(data && data.publishedCount);
+        const missed = Number(data && data.missedCount);
+        const eligible = Number(data && data.eligibleContent);
+
+        if (!Number.isFinite(eligible) || !Number.isFinite(published) || !Number.isFinite(missed)) {
+            showChartMessage("publishedMissed", "Scheduled post results aren't available right now.");
+            return;
+        }
+        if (eligible === 0) {
+            showChartMessage(
+                "publishedMissed",
+                "No scheduled posts have reached their date yet. Once a scheduled post's date passes, it will appear here as published or missed."
+            );
+            return;
+        }
+        if (chartLibraryMissing("publishedMissed")) return;
+
+        const el = chartElements("publishedMissed");
+        showChartCanvas("publishedMissed");
+
+        const pct = data.consistencyPercentage;
+        if (el.caption) {
+            el.caption.textContent =
+                `${formatNumber(published)} published and ${formatNumber(missed)} missed, out of ` +
+                `${formatNumber(eligible)} scheduled post${eligible === 1 ? "" : "s"} whose date has passed` +
+                (pct === null || pct === undefined ? "." : ` (${pct}% published).`);
+        }
+        if (el.canvas) {
+            el.canvas.setAttribute(
+                "aria-label",
+                `${published} published and ${missed} missed scheduled posts.`
+            );
+        }
+
+        if (publishedMissedChart) {
+            publishedMissedChart.destroy();
+            publishedMissedChart = null;
+        }
+        clearCanvasChart(el.canvas);
+
+        publishedMissedChart = new Chart(el.canvas.getContext("2d"), {
+            type: "doughnut",
+            data: {
+                labels: ["Published", "Missed"],
+                datasets: [{
+                    data: [published, missed],
+                    backgroundColor: [DASH_CHART_COLORS.published, DASH_CHART_COLORS.missed],
+                    borderColor: "#fff6ee",
+                    borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: "58%",
+                plugins: {
+                    legend: {
+                        position: "bottom",
+                        labels: { color: DASH_CHART_COLORS.text },
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => `${ctx.label}: ${formatNumber(ctx.parsed)} post${ctx.parsed === 1 ? "" : "s"}`,
+                        },
+                    },
+                },
+            },
+        });
+    } catch (error) {
+        console.error("Could not draw published vs missed chart:", error);
+        showChartMessage("publishedMissed", "Could not draw the published vs missed chart.");
     }
 }
 

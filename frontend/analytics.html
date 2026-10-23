@@ -6,6 +6,7 @@
     <title>Analytics | ContentCreator</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+    <script src="chart-fallback.js"></script>
 
     <!-- Analytics-page-only styles. Reuses the app's existing colours,
          card, table, button and modal conventions from style.css. -->
@@ -226,6 +227,47 @@
             text-decoration: underline;
         }
 
+        /* ---- Posting goal settings form ---- */
+        .goal-form {
+            margin-top: 14px;
+            padding-top: 14px;
+            border-top: 1px solid #98989d;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-width: 360px;
+        }
+
+        .goal-form-row {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            font-size: 13px;
+        }
+
+        .goal-form-row select,
+        .goal-form-row input {
+            padding: 8px;
+            border: 1px solid #98989d;
+            border-radius: 8px;
+            background: #fff6ee;
+            color: #313135;
+            font-size: 14px;
+        }
+
+        .goal-form-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .goal-form-error {
+            margin: 0;
+            min-height: 1em;
+            color: #7a1a19;
+            font-size: 13px;
+        }
+
         /* ---- Posting consistency ---- */
         .consistency-summary {
             display: flex;
@@ -352,10 +394,62 @@
                 </div>
             </div>
 
-            <!-- POSTING CONSISTENCY -->
+            <!-- POSTING GOAL PROGRESS (GET/PUT/DELETE /posting-goal) -->
             <section class="analytics-card">
-                <h3>Posting Consistency</h3>
-                <p>How reliably scheduled content actually gets published, based on completed publishing deadlines.</p>
+                <div class="analytics-card-header">
+                    <div>
+                        <h3>Posting Goal Progress</h3>
+                        <p>How much of your own posting target you have reached. A goal is a target, not a schedule — you don't need to schedule a post for every day.</p>
+                    </div>
+                    <button type="button" id="goalEditBtn" class="quick-action-btn quick-action-btn--small" style="display:none;">Set posting goal</button>
+                </div>
+
+                <div class="consistency-summary">
+                    <div class="consistency-percentage" id="goalProgressValue">—</div>
+                    <div class="consistency-counts">
+                        <div class="consistency-count-item">
+                            <span class="consistency-count-value" id="goalProgressCount">—</span>
+                            <span class="consistency-count-label" id="goalProgressCountLabel">Published</span>
+                        </div>
+                    </div>
+                </div>
+                <p class="consistency-note" id="goalProgressDetail">Loading…</p>
+
+                <form id="goalForm" class="goal-form" style="display:none;" novalidate>
+                    <div class="goal-form-row">
+                        <label for="goalType">Posting rhythm</label>
+                        <select id="goalType">
+                            <option value="daily">Every day</option>
+                            <option value="weekly">A number of posts per week</option>
+                            <option value="monthly">A number of posts per month</option>
+                            <option value="custom">Custom target</option>
+                        </select>
+                    </div>
+                    <div class="goal-form-row" id="goalCountRow">
+                        <label for="goalCount">Number of posts</label>
+                        <input type="number" id="goalCount" min="1" step="1" inputmode="numeric">
+                    </div>
+                    <div class="goal-form-row" id="goalPeriodRow" style="display:none;">
+                        <label for="goalPeriod">Per</label>
+                        <select id="goalPeriod">
+                            <option value="day">day</option>
+                            <option value="week">week</option>
+                            <option value="month" selected>month</option>
+                        </select>
+                    </div>
+                    <div class="goal-form-actions">
+                        <button type="submit" id="goalSaveBtn" class="quick-action-btn quick-action-btn--small">Save goal</button>
+                        <button type="button" id="goalCancelBtn" class="quick-action-btn quick-action-btn--small">Cancel</button>
+                        <button type="button" id="goalRemoveBtn" class="quick-action-btn quick-action-btn--small" style="display:none;">Remove goal</button>
+                    </div>
+                    <p id="goalFormError" class="goal-form-error" role="alert"></p>
+                </form>
+            </section>
+
+            <!-- SCHEDULE ADHERENCE (previously labelled "Posting Consistency") -->
+            <section class="analytics-card">
+                <h3>Schedule Adherence</h3>
+                <p>Of the scheduled posts that were due, how many were actually published rather than missed.</p>
 
                 <div id="consistencySummary" class="consistency-summary">
                     <div class="consistency-percentage" id="consistencyPercentage">—</div>
@@ -370,7 +464,7 @@
                         </div>
                     </div>
                 </div>
-                <p class="consistency-note" id="consistencyNote">Based on completed scheduled publishing deadlines. Cancelled items are never counted against you.</p>
+                <p class="consistency-note" id="consistencyNote">Future and cancelled posts are excluded.</p>
                 <div id="consistencyEmpty" class="empty-state" style="display:none;">
                     No completed publishing deadlines yet.
                 </div>
@@ -383,7 +477,7 @@
                                 <th>Platform</th>
                                 <th>Published</th>
                                 <th>Missed</th>
-                                <th>Consistency</th>
+                                <th>Schedule Adherence</th>
                             </tr>
                         </thead>
                         <tbody id="consistencyPlatformTableBody"></tbody>
@@ -393,7 +487,7 @@
                     </div>
                 </div>
 
-                <h4 class="consistency-subheading">Consistency Over Time</h4>
+                <h4 class="consistency-subheading">Schedule Adherence Over Time</h4>
                 <div class="chart-wrap" style="height:200px;">
                     <canvas id="consistencyTrendChart"></canvas>
                     <div id="consistencyTrendEmpty" class="empty-state" style="display:none;">
@@ -481,8 +575,8 @@
 
             <!-- PERFORMANCE OVER TIME -->
             <section class="analytics-card">
-                <h3>Performance Over Time</h3>
-                <p>Total views by day, across every recorded metric.</p>
+                <h3>Recorded Views by Sync Date</h3>
+                <p>Lifetime view totals recorded on each sync date, summed across your content. These are cumulative snapshots, not views gained per day, and a chart is only drawn once at least 3 sync dates exist.</p>
                 <div class="chart-wrap">
                     <canvas id="trendChart"></canvas>
                     <div id="trendEmpty" class="empty-state" style="display:none;">
@@ -504,7 +598,6 @@
                                 <th>Views</th>
                                 <th>Likes</th>
                                 <th>Comments</th>
-                                <th>Shares</th>
                                 <th>Avg. Engagement Rate</th>
                             </tr>
                         </thead>
@@ -543,7 +636,6 @@
                                 <th>Views</th>
                                 <th>Likes</th>
                                 <th>Comments</th>
-                                <th>Shares</th>
                                 <th>Engagement Rate</th>
                                 <th>Recorded At</th>
                                 <th>Actions</th>
@@ -558,10 +650,77 @@
                 </div>
             </section>
 
+            <!-- ===== BEGIN TIKTOK SAMPLE PREVIEW (illustrative, frontend-only) =====
+                 Remove this whole block, the tiktok-sample-preview.js file and its
+                 <script> tag below to delete the preview. Figures are made up, are not
+                 fetched from the backend or TikTok, and are never part of real analytics. -->
+            <section class="analytics-card" id="tiktokSampleSection">
+                <style>
+                    #tiktokSamplePanel[hidden] { display: none; }
+                    .tiktok-sample-disclaimer {
+                        margin: 12px 0;
+                        padding: 10px 12px;
+                        border: 1px dashed #98989d;
+                        border-radius: 8px;
+                        background: #fff;
+                        color: #4e1e17;
+                        font-size: 13px;
+                        line-height: 1.4;
+                    }
+                    .tiktok-sample-num { text-align: right; white-space: nowrap; }
+                    .tiktok-sample-bars { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+                    .tiktok-sample-bars-title { font-size: 13px; color: #7a6f6f; margin: 16px 0 0; }
+                    .tiktok-sample-bar-row {
+                        display: grid;
+                        grid-template-columns: minmax(110px, 200px) 1fr minmax(100px, auto);
+                        gap: 10px;
+                        align-items: center;
+                        font-size: 12px;
+                        color: #7a6f6f;
+                    }
+                    .tiktok-sample-bar-track { background: #f0e1d4; border-radius: 4px; height: 12px; overflow: hidden; }
+                    .tiktok-sample-bar-fill { background: #98989d; height: 100%; border-radius: 4px; }
+                    @media (max-width: 600px) {
+                        .tiktok-sample-bar-row { grid-template-columns: 1fr; gap: 4px; }
+                    }
+                </style>
+
+                <h3>TikTok</h3>
+                <p>TikTok API access or approval is pending, so no live TikTok data is available. You can view a clearly labelled sample of the intended layout.</p>
+                <button type="button" id="tiktokSampleToggleBtn" class="quick-action-btn quick-action-btn--small"
+                        aria-expanded="false" aria-controls="tiktokSamplePanel">Show TikTok sample preview</button>
+
+                <div id="tiktokSamplePanel" hidden>
+                    <h3 style="margin-top:16px;">TikTok Preview — Sample Data</h3>
+                    <div class="tiktok-sample-disclaimer" role="note">
+                        Illustrative sample data only; these figures were not retrieved from TikTok. Live integration is pending API access or approval.
+                    </div>
+
+                    <div class="table-wrap">
+                        <table class="analytics-table">
+                            <thead>
+                                <tr>
+                                    <th>Sample content</th>
+                                    <th class="tiktok-sample-num">Sample views</th>
+                                    <th class="tiktok-sample-num">Sample likes</th>
+                                    <th class="tiktok-sample-num">Sample comments</th>
+                                </tr>
+                            </thead>
+                            <tbody id="tiktokSampleTableBody"></tbody>
+                        </table>
+                    </div>
+
+                    <p class="tiktok-sample-bars-title">Sample views by entry (illustrative)</p>
+                    <div class="tiktok-sample-bars" id="tiktokSampleBars"></div>
+                </div>
+            </section>
+            <!-- ===== END TIKTOK SAMPLE PREVIEW ===== -->
+
         </main>
     </div>
 </div>
 
 <script src="analytics.js"></script>
+<script src="tiktok-sample-preview.js"></script>
 </body>
 </html>

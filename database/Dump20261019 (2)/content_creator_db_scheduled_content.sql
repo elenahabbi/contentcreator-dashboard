@@ -38,7 +38,7 @@ CREATE TABLE `scheduled_content` (
   KEY `idx_scheduled_content_youtube_channel_id` (`youtube_channel_id`),
   CONSTRAINT `scheduled_content_ibfk_1` FOREIGN KEY (`content_id`) REFERENCES `content` (`content_id`) ON DELETE CASCADE,
   CONSTRAINT `scheduled_content_ibfk_2` FOREIGN KEY (`platform_id`) REFERENCES `platforms` (`platform_id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=33 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=37 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -47,7 +47,7 @@ CREATE TABLE `scheduled_content` (
 
 LOCK TABLES `scheduled_content` WRITE;
 /*!40000 ALTER TABLE `scheduled_content` DISABLE KEYS */;
-INSERT INTO `scheduled_content` VALUES (28,16,2,'2026-09-10 00:00:00','2026-09-10 18:17:44','Published',NULL,NULL,NULL),(29,16,1,'2026-09-10 00:00:00','2026-09-10 18:17:44','Published','EKwD60mHzQo','https://www.youtube.com/watch?v=EKwD60mHzQo','UCh88WUyrJS60w8mr_nl0NMw'),(30,17,2,'2026-09-11 00:00:00',NULL,'Missed',NULL,NULL,NULL),(31,17,1,'2026-09-11 00:00:00',NULL,'Missed',NULL,NULL,NULL),(32,18,1,'2026-09-24 00:00:00','2026-09-24 14:58:17','Published','Mb5Z207Lqgg','https://www.youtube.com/watch?v=Mb5Z207Lqgg','UCh88WUyrJS60w8mr_nl0NMw');
+INSERT INTO `scheduled_content` VALUES (28,16,2,'2026-09-10 00:00:00','2026-09-10 18:17:44','Published',NULL,NULL,NULL),(29,16,1,'2026-09-10 00:00:00','2026-09-10 18:17:44','Published','EKwD60mHzQo','https://www.youtube.com/watch?v=EKwD60mHzQo','UCh88WUyrJS60w8mr_nl0NMw'),(30,17,2,'2026-09-11 00:00:00',NULL,'Missed',NULL,NULL,NULL),(31,17,1,'2026-09-11 00:00:00',NULL,'Missed',NULL,NULL,NULL),(32,18,1,'2026-09-24 00:00:00','2026-09-24 14:58:17','Published','Mb5Z207Lqgg','https://www.youtube.com/watch?v=Mb5Z207Lqgg','UCh88WUyrJS60w8mr_nl0NMw'),(33,20,2,'2026-10-23 00:00:00',NULL,'Missed',NULL,NULL,NULL),(34,20,1,'2026-10-23 00:00:00',NULL,'Missed',NULL,NULL,NULL),(35,21,2,'2026-10-24 00:00:00',NULL,'Scheduled',NULL,NULL,NULL),(36,21,1,'2026-10-24 00:00:00',NULL,'Scheduled',NULL,NULL,NULL);
 /*!40000 ALTER TABLE `scheduled_content` ENABLE KEYS */;
 UNLOCK TABLES;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
@@ -60,4 +60,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-10-19 14:29:23
+-- Dump completed on 2026-10-23 13:07:35

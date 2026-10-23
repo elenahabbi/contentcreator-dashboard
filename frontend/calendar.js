@@ -10,6 +10,12 @@ closeBtn.addEventListener("click", () => {
     sidebar.classList.remove("active");
 });
 
+// Opened from the dashboard's "Schedule Event" quick action (calendar.html?schedule=1):
+// shows the existing Schedule Content sidebar. No second form is created.
+if (new URLSearchParams(window.location.search).get("schedule") === "1") {
+    sidebar.classList.add("active");
+}
+
 const grid = document.querySelector(".calendar-grid");
 
 const monthSelect = document.getElementById("month");
@@ -321,6 +327,7 @@ async function saveScheduledContent() {
             // No script chosen yet — create a bare content item to schedule.
             const contentRes = await fetch("http://localhost:3000/content", {
                 method: "POST",
+                credentials: "include",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ title, content_type: "general" })
             });
@@ -331,6 +338,7 @@ async function saveScheduledContent() {
 
         const scheduleRes = await fetch("http://localhost:3000/scheduled-content", {
             method: "POST",
+            credentials: "include",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 content_id: contentId,
@@ -547,7 +555,6 @@ function renderYoutubeStats(stats) {
         <span><strong>${Number(stats.views).toLocaleString()}</strong> views</span>
         <span><strong>${Number(stats.likes).toLocaleString()}</strong> likes</span>
         <span><strong>${Number(stats.comments).toLocaleString()}</strong> comments</span>
-        <span><strong>${stats.shares_available === false ? "—" : Number(stats.shares).toLocaleString()}</strong> shares</span>
     `;
 }
 
@@ -753,6 +760,7 @@ document.getElementById("saveEditEvent").onclick = async () => {
 
         const res = await fetch("http://localhost:3000/scheduled-content", {
             method: "POST",
+            credentials: "include",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 content_id: currentModalItem.content_id,

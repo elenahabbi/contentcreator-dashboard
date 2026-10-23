@@ -16,36 +16,30 @@
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
 --
--- Table structure for table `competitor_content`
+-- Table structure for table `content_platforms`
 --
 
-DROP TABLE IF EXISTS `competitor_content`;
+DROP TABLE IF EXISTS `content_platforms`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
-CREATE TABLE `competitor_content` (
-  `competitor_content_id` int(11) NOT NULL AUTO_INCREMENT,
-  `competitor_id` int(11) NOT NULL,
-  `title` varchar(255) DEFAULT NULL,
-  `topic` varchar(255) DEFAULT NULL,
-  `published_at` datetime DEFAULT NULL,
-  `views` int(11) DEFAULT 0,
-  `likes` int(11) DEFAULT 0,
-  `comments` int(11) DEFAULT 0,
-  `shares` int(11) DEFAULT 0,
-  `source_url` varchar(500) DEFAULT NULL,
-  PRIMARY KEY (`competitor_content_id`),
-  KEY `competitor_id` (`competitor_id`),
-  CONSTRAINT `competitor_content_ibfk_1` FOREIGN KEY (`competitor_id`) REFERENCES `competitors` (`competitor_id`) ON DELETE CASCADE
+CREATE TABLE `content_platforms` (
+  `content_id` int(11) NOT NULL,
+  `platform_id` int(11) NOT NULL,
+  PRIMARY KEY (`content_id`,`platform_id`),
+  KEY `platform_id` (`platform_id`),
+  CONSTRAINT `content_platforms_ibfk_1` FOREIGN KEY (`content_id`) REFERENCES `content` (`content_id`) ON DELETE CASCADE,
+  CONSTRAINT `content_platforms_ibfk_2` FOREIGN KEY (`platform_id`) REFERENCES `platforms` (`platform_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
--- Dumping data for table `competitor_content`
+-- Dumping data for table `content_platforms`
 --
 
-LOCK TABLES `competitor_content` WRITE;
-/*!40000 ALTER TABLE `competitor_content` DISABLE KEYS */;
-/*!40000 ALTER TABLE `competitor_content` ENABLE KEYS */;
+LOCK TABLES `content_platforms` WRITE;
+/*!40000 ALTER TABLE `content_platforms` DISABLE KEYS */;
+INSERT INTO `content_platforms` VALUES (1,1),(1,2),(3,2),(4,1),(5,1),(6,2),(6,3),(7,1),(7,2),(8,1),(8,2),(9,1),(9,2),(10,1),(10,2),(13,1),(13,2),(14,1),(14,2),(15,1),(15,2),(16,1),(16,2),(17,1),(17,2),(18,1),(20,1),(20,2),(21,1),(21,2);
+/*!40000 ALTER TABLE `content_platforms` ENABLE KEYS */;
 UNLOCK TABLES;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -57,4 +51,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-10-19 14:29:26
+-- Dump completed on 2026-10-23 13:07:38

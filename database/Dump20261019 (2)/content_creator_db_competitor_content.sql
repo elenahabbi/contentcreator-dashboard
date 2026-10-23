@@ -16,33 +16,36 @@
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
 --
--- Table structure for table `users`
+-- Table structure for table `competitor_content`
 --
 
-DROP TABLE IF EXISTS `users`;
+DROP TABLE IF EXISTS `competitor_content`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
-CREATE TABLE `users` (
-  `user_id` int(11) NOT NULL AUTO_INCREMENT,
-  `username` varchar(100) NOT NULL,
-  `email` varchar(150) NOT NULL,
-  `password_hash` varchar(255) DEFAULT NULL,
-  `youtube_channel_id` varchar(50) DEFAULT NULL,
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  PRIMARY KEY (`user_id`),
-  UNIQUE KEY `username` (`username`),
-  UNIQUE KEY `email` (`email`)
-) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+CREATE TABLE `competitor_content` (
+  `competitor_content_id` int(11) NOT NULL AUTO_INCREMENT,
+  `competitor_id` int(11) NOT NULL,
+  `title` varchar(255) DEFAULT NULL,
+  `topic` varchar(255) DEFAULT NULL,
+  `published_at` datetime DEFAULT NULL,
+  `views` int(11) DEFAULT 0,
+  `likes` int(11) DEFAULT 0,
+  `comments` int(11) DEFAULT 0,
+  `shares` int(11) DEFAULT 0,
+  `source_url` varchar(500) DEFAULT NULL,
+  PRIMARY KEY (`competitor_content_id`),
+  KEY `competitor_id` (`competitor_id`),
+  CONSTRAINT `competitor_content_ibfk_1` FOREIGN KEY (`competitor_id`) REFERENCES `competitors` (`competitor_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
--- Dumping data for table `users`
+-- Dumping data for table `competitor_content`
 --
 
-LOCK TABLES `users` WRITE;
-/*!40000 ALTER TABLE `users` DISABLE KEYS */;
-INSERT INTO `users` VALUES (1,'Demo Creator','creator@example.com',NULL,'UCh88WUyrJS60w8mr_nl0NMw','2026-08-31 18:44:04'),(2,'elena','elena@example.com','placeholder','UCjaV7CfsUqdevbz3PrjK0EA','2026-08-31 19:56:25'),(3,'romunashamed','romunashamed@gmail.com','$2b$10$9Snx3TyGD3MARwixbvgSae/RNMif5XZOSBTNMF0zPZBEhw.oQtqm2','UCh88WUyrJS60w8mr_nl0NMw','2026-09-23 17:05:00'),(4,'bunny_news','uwontknowmeanyways@gmail.com','$2b$10$x2RjBrvrGQ1nUYEmQ003yeJhXpT9UAaEFT/vA41BwZM42l0CSWLU6',NULL,'2026-09-24 11:52:53');
-/*!40000 ALTER TABLE `users` ENABLE KEYS */;
+LOCK TABLES `competitor_content` WRITE;
+/*!40000 ALTER TABLE `competitor_content` DISABLE KEYS */;
+/*!40000 ALTER TABLE `competitor_content` ENABLE KEYS */;
 UNLOCK TABLES;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
@@ -54,4 +57,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-10-19 14:29:26
+-- Dump completed on 2026-10-23 13:07:38

@@ -38,7 +38,7 @@ CREATE TABLE `recommendations` (
   KEY `idx_recommendations_user_status` (`user_id`,`status`),
   CONSTRAINT `recommendations_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE,
   CONSTRAINT `recommendations_ibfk_2` FOREIGN KEY (`opportunity_id`) REFERENCES `opportunities` (`opportunity_id`) ON DELETE SET NULL
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -47,7 +47,7 @@ CREATE TABLE `recommendations` (
 
 LOCK TABLES `recommendations` WRITE;
 /*!40000 ALTER TABLE `recommendations` DISABLE KEYS */;
-INSERT INTO `recommendations` VALUES (1,1,NULL,'ReviewMissedContent',NULL,'Review your missed scheduled content','Posting consistency is 33.33% (4 published / 8 missed out of 12 eligible items), below the 70% target.','2026-09-10 18:08:33','2026-09-28 13:53:39','Active');
+INSERT INTO `recommendations` VALUES (1,1,NULL,'ReviewMissedContent',NULL,'Review your missed scheduled content','Posting consistency is 33.33% (4 published / 8 missed out of 12 eligible items), below the 70% target.','2026-09-10 18:08:33','2026-09-28 13:53:39','Active'),(2,3,1,'ExploreRecentTopic','Explore a recent Faith topic','Consider reviewing a recent public YouTube topic related to Faith and deciding whether it suits your audience.','A recent public YouTube video relevant to Faith was published: \"Moments Jesus SAVED Them ✝️? #jesussaves #faith #viralshorts #holyprotection\" on 2026-10-23. This is topic discovery only; it says nothing about how content on this topic would perform. Source: YouTube Data API.','2026-10-22 12:50:42','2026-10-23 12:54:40','Active'),(3,3,2,'ExploreRecentTopic','Explore a recent Lifestyle topic','Consider reviewing a recent public YouTube topic related to Lifestyle and deciding whether it suits your audience.','A recent public YouTube video relevant to Lifestyle was published: \"Aam pana ? #food #cooking #lifestyle #shorts #recipe #viral\" on 2026-10-23. This is topic discovery only; it says nothing about how content on this topic would perform. Source: YouTube Data API.','2026-10-22 12:50:42','2026-10-23 12:53:35','Active'),(4,3,NULL,'ReviewMissedContent','Improve posting consistency','Your posting consistency is below target. Consider reviewing your missed scheduled content and planning your next posts.','Posting consistency is 33.33% (1 published / 2 missed out of 3 eligible items), below the 70% target.','2026-10-23 12:22:18','2026-10-23 12:22:18','Active');
 /*!40000 ALTER TABLE `recommendations` ENABLE KEYS */;
 UNLOCK TABLES;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
@@ -60,4 +60,4 @@ UNLOCK TABLES;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-10-19 14:29:25
+-- Dump completed on 2026-10-23 13:07:37

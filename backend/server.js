@@ -262,6 +262,246 @@ app.get(
 );
 
 // =======================================================================
+// PHASE 4 — CREATOR PROFILE, TOPICS, ONBOARDING
+// Requires database/phase4_creator_profiles_topics.sql to have been run.
+// Every route uses requireAuth + getUserId(req); no user id is ever read
+// from the request body, query string, or URL.
+// =======================================================================
+
+const PROFILE_LIMITS = { displayName: 100, niche: 100, bio: 500, topic: 60, maxTopics: 20 };
+
+// Trim, collapse inner whitespace, reject control characters / angle
+// brackets and over-long values. Returns the cleaned string or null.
+function normalizeTopicName(raw) {
+  if (typeof raw !== "string") return null;
+  const cleaned = raw.normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (!cleaned || cleaned.length > PROFILE_LIMITS.topic) return null;
+  if (/[\u0000-\u001f\u007f<>]/.test(cleaned)) return null;
+  return cleaned;
+}
+
+// Returns { value } (string or null) or { error }. Empty optional text
+// becomes null; required text must be non-empty.
+function cleanProfileText(raw, label, max, required) {
+  if (raw === null || raw === undefined) raw = "";
+  if (typeof raw !== "string") return { error: `${label} must be text.` };
+  const value = raw.normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (/[\u0000-\u001f\u007f<>]/.test(value)) return { error: `${label} contains invalid characters.` };
+  if (!value) return required ? { error: `${label} is required.` } : { value: null };
+  if (value.length > max) return { error: `${label} must be ${max} characters or fewer.` };
+  return { value };
+}
+
+// Never leaks SQL text or stack traces to the browser. A missing table
+// (migration not run yet) is reported as 503 so the frontend can tell it
+// apart from "this user has no profile yet" (which is a normal 200).
+function sendProfileError(res, err) {
+  if (err && err.code === "ER_NO_SUCH_TABLE") {
+    return res.status(503).json({
+      code: "PROFILE_SCHEMA_MISSING",
+      message: "Profile storage is not set up yet. The Phase 4 database migration has not been run.",
+    });
+  }
+  console.error("[profile] request failed:", err && (err.code || err.message));
+  return res.status(500).json({ message: "Could not complete the profile request. Please try again." });
+}
+
+async function loadCreatorProfile(userId) {
+  const [profiles] = await db.query(
+    `SELECT display_name, primary_niche, bio, onboarding_completed_at
+       FROM creator_profiles WHERE user_id = ? LIMIT 1`,
+    [userId]
+  );
+  const [topics] = await db.query(
+    "SELECT topic_id, topic_name FROM creator_topics WHERE user_id = ? ORDER BY topic_name",
+    [userId]
+  );
+  const p = profiles[0] || null;
+  return {
+    profile: p
+      ? { display_name: p.display_name, primary_niche: p.primary_niche, bio: p.bio }
+      : null,
+    topics,
+    onboarding_completed: !!(p && p.onboarding_completed_at),
+  };
+}
+
+// Available to later phases (opportunity engine). Not used by Phase 4
+// routes and deliberately separate from getCreatorTopics(), which returns
+// category-based topics derived from content and must keep that shape.
+async function getCreatorProfileTopics(userId) {
+  const [rows] = await db.query(
+    "SELECT topic_id, topic_name FROM creator_topics WHERE user_id = ? ORDER BY topic_name",
+    [userId]
+  );
+  return rows;
+}
+
+app.get(
+  "/profile",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    try {
+      res.json(await loadCreatorProfile(getUserId(req)));
+    } catch (err) {
+      sendProfileError(res, err);
+    }
+  })
+);
+
+// Create or update. Only the fields present in the body are changed, so
+// an unrelated update never wipes the others.
+app.put(
+  "/profile",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const body = req.body || {};
+    const changes = {};
+
+    if (body.display_name !== undefined) {
+      const r = cleanProfileText(body.display_name, "Display name", PROFILE_LIMITS.displayName, true);
+      if (r.error) return res.status(400).json({ message: r.error });
+      changes.display_name = r.value;
+    }
+    if (body.primary_niche !== undefined) {
+      const r = cleanProfileText(body.primary_niche, "Primary niche", PROFILE_LIMITS.niche, false);
+      if (r.error) return res.status(400).json({ message: r.error });
+      changes.primary_niche = r.value;
+    }
+    if (body.bio !== undefined) {
+      const r = cleanProfileText(body.bio, "Bio", PROFILE_LIMITS.bio, false);
+      if (r.error) return res.status(400).json({ message: r.error });
+      changes.bio = r.value;
+    }
+
+    try {
+      const [existing] = await db.query(
+        "SELECT user_id FROM creator_profiles WHERE user_id = ? LIMIT 1",
+        [userId]
+      );
+
+      if (!existing.length) {
+        if (!changes.display_name) {
+          return res.status(400).json({ message: "Display name is required." });
+        }
+        try {
+          await db.query(
+            `INSERT INTO creator_profiles (user_id, display_name, primary_niche, bio)
+             VALUES (?, ?, ?, ?)`,
+            [userId, changes.display_name, changes.primary_niche || null, changes.bio || null]
+          );
+        } catch (err) {
+          if (err.code === "ER_DUP_ENTRY") {
+            return res.status(409).json({ message: "Profile was just created in another tab. Please retry." });
+          }
+          throw err;
+        }
+      } else {
+        const columns = Object.keys(changes); // whitelisted names above, never user input
+        if (columns.length) {
+          await db.query(
+            `UPDATE creator_profiles SET ${columns.map((c) => `${c} = ?`).join(", ")} WHERE user_id = ?`,
+            [...columns.map((c) => changes[c]), userId]
+          );
+        }
+      }
+
+      res.json(await loadCreatorProfile(userId));
+    } catch (err) {
+      sendProfileError(res, err);
+    }
+  })
+);
+
+app.post(
+  "/profile/topics",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    const topicName = normalizeTopicName((req.body || {}).topic_name);
+    if (!topicName) {
+      return res.status(400).json({
+        message: `Topic must be 1-${PROFILE_LIMITS.topic} characters of plain text.`,
+      });
+    }
+
+    try {
+      const [[{ total }]] = await db.query(
+        "SELECT COUNT(*) AS total FROM creator_topics WHERE user_id = ?",
+        [userId]
+      );
+      if (total >= PROFILE_LIMITS.maxTopics) {
+        return res.status(400).json({ message: `You can keep up to ${PROFILE_LIMITS.maxTopics} topics.` });
+      }
+
+      const [result] = await db.query(
+        "INSERT INTO creator_topics (user_id, topic_name) VALUES (?, ?)",
+        [userId, topicName]
+      );
+      res.status(201).json({ topic_id: result.insertId, topic_name: topicName });
+    } catch (err) {
+      if (err.code === "ER_DUP_ENTRY") {
+        return res.status(409).json({ message: "You already have that topic." });
+      }
+      sendProfileError(res, err);
+    }
+  })
+);
+
+app.delete(
+  "/profile/topics/:topicId",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const topicId = Number(req.params.topicId);
+    if (!Number.isInteger(topicId) || topicId <= 0) {
+      return res.status(400).json({ message: "Invalid topic id." });
+    }
+    try {
+      // user_id in the WHERE clause is the ownership check. Someone else's
+      // topic id produces the same 404 as a nonexistent one.
+      const [result] = await db.query(
+        "DELETE FROM creator_topics WHERE topic_id = ? AND user_id = ?",
+        [topicId, getUserId(req)]
+      );
+      if (!result.affectedRows) return res.status(404).json({ message: "Topic not found." });
+      res.json({ message: "Topic removed." });
+    } catch (err) {
+      sendProfileError(res, err);
+    }
+  })
+);
+
+// Marks onboarding complete only if the SERVER already holds a display
+// name and at least one topic for this user. The browser's claim that it
+// finished is never trusted.
+app.post(
+  "/profile/complete",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const userId = getUserId(req);
+    try {
+      const state = await loadCreatorProfile(userId);
+      if (!state.profile || !state.profile.display_name) {
+        return res.status(400).json({ message: "Save your display name before finishing setup." });
+      }
+      if (!state.topics.length) {
+        return res.status(400).json({ message: "Add at least one topic before finishing setup." });
+      }
+      await db.query(
+        `UPDATE creator_profiles
+            SET onboarding_completed_at = COALESCE(onboarding_completed_at, NOW())
+          WHERE user_id = ?`,
+        [userId]
+      );
+      res.json(await loadCreatorProfile(userId));
+    } catch (err) {
+      sendProfileError(res, err);
+    }
+  })
+);
+
+// =======================================================================
 // AUTOMATIC MISSED-CONTENT DETECTION
 // A scheduled item is "missed" the moment its scheduled_date is in the
 // past and nobody ever marked it Published. Nothing here asks the creator
@@ -364,6 +604,189 @@ const YT_CHANNEL_SCOPE_SQL = `
     )
   )
 `;
+
+// =======================================================================
+// CREATOR POSTING GOALS
+// Requires database/phase_posting_goals.sql to have been run. One row per
+// creator in creator_posting_goals. Every route uses requireAuth +
+// getUserId(req); no user id is ever read from the body, query or URL.
+//
+// A goal is a TARGET, not a schedule: progress is simply the number of
+// posts actually published in the current day / week / month, compared with
+// the creator's target. It is kept separate from Schedule Adherence
+// (/analytics/consistency), which only looks at scheduled items that were due.
+//
+// "Published post" = a scheduled_content row with status 'Published'
+// (one per platform it went out on), placed in a window by published_at,
+// falling back to scheduled_date when published_at is empty.
+// =======================================================================
+
+const POSTING_GOAL_TYPES = ["daily", "weekly", "monthly", "custom"];
+const POSTING_GOAL_PERIODS = ["day", "week", "month"];
+const POSTING_GOAL_MAX_TARGET = { day: 20, week: 50, month: 200 };
+
+// Static SQL fragments keyed by a whitelisted period — never built from
+// request input. Weeks run Monday–Sunday (same as the ISO weeks used by
+// /analytics/consistency/trend).
+const POSTING_GOAL_WINDOWS = {
+  day: {
+    label: "today",
+    start: "CURDATE()",
+    end: "(CURDATE() + INTERVAL 1 DAY)",
+  },
+  week: {
+    label: "this week",
+    start: "(CURDATE() - INTERVAL WEEKDAY(CURDATE()) DAY)",
+    end: "(CURDATE() - INTERVAL WEEKDAY(CURDATE()) DAY + INTERVAL 7 DAY)",
+  },
+  month: {
+    label: "this month",
+    start: "DATE_FORMAT(CURDATE(), '%Y-%m-01')",
+    end: "(DATE_FORMAT(CURDATE(), '%Y-%m-01') + INTERVAL 1 MONTH)",
+  },
+};
+
+function sendPostingGoalError(res, err) {
+  if (err && err.code === "ER_NO_SUCH_TABLE") {
+    return res.status(503).json({
+      code: "POSTING_GOAL_SCHEMA_MISSING",
+      message: "Posting goal storage is not set up yet. The posting goals database migration has not been run.",
+    });
+  }
+  console.error("[posting-goal] request failed:", err && (err.code || err.message));
+  return res.status(500).json({ message: "Could not complete the posting goal request. Please try again." });
+}
+
+// Returns { value: { goal_type, target_count, period } } or { error }.
+function normalizePostingGoalInput(body) {
+  const { goal_type, target_count, period } = body || {};
+
+  if (!POSTING_GOAL_TYPES.includes(goal_type)) {
+    return { error: "Choose a posting rhythm: daily, weekly, monthly or custom." };
+  }
+
+  let resolvedPeriod;
+  let resolvedCount;
+
+  if (goal_type === "daily") {
+    // "Every day" is always exactly one post per day.
+    resolvedPeriod = "day";
+    resolvedCount = 1;
+  } else {
+    resolvedPeriod =
+      goal_type === "weekly" ? "week" : goal_type === "monthly" ? "month" : period;
+    if (!POSTING_GOAL_PERIODS.includes(resolvedPeriod)) {
+      return { error: "Choose whether the custom target is per day, week or month." };
+    }
+    if (typeof target_count !== "number" || !Number.isInteger(target_count)) {
+      return { error: "Number of posts must be a whole number." };
+    }
+    resolvedCount = target_count;
+  }
+
+  const max = POSTING_GOAL_MAX_TARGET[resolvedPeriod];
+  if (resolvedCount < 1 || resolvedCount > max) {
+    return { error: `Number of posts per ${resolvedPeriod} must be between 1 and ${max}.` };
+  }
+
+  return { value: { goal_type, target_count: resolvedCount, period: resolvedPeriod } };
+}
+
+async function loadPostingGoal(userId) {
+  const [rows] = await db.query(
+    "SELECT goal_type, target_count, period FROM creator_posting_goals WHERE user_id = ? LIMIT 1",
+    [userId]
+  );
+  if (rows.length === 0) return null;
+  return {
+    goal_type: rows[0].goal_type,
+    target_count: Number(rows[0].target_count),
+    period: rows[0].period,
+  };
+}
+
+async function computePostingGoalProgress(userId, goal) {
+  const w = POSTING_GOAL_WINDOWS[goal.period];
+  if (!w) return null;
+
+  // scheduled_content has no user_id of its own — ownership is via the
+  // parent content row, same as everywhere else in this file.
+  const [rows] = await db.query(
+    `SELECT COUNT(*) AS published_count
+       FROM scheduled_content sc
+       JOIN content c ON c.content_id = sc.content_id
+      WHERE c.user_id = ?
+        AND sc.status = 'Published'
+        AND COALESCE(sc.published_at, sc.scheduled_date) >= ${w.start}
+        AND COALESCE(sc.published_at, sc.scheduled_date) < ${w.end}`,
+    [userId]
+  );
+
+  const publishedCount = Number(rows[0].published_count) || 0;
+  return {
+    period: goal.period,
+    window_label: w.label,
+    published_count: publishedCount,
+    target_count: goal.target_count,
+    // goal.target_count is validated >= 1, so this never divides by zero.
+    percentage: Number(((publishedCount / goal.target_count) * 100).toFixed(1)),
+  };
+}
+
+async function buildPostingGoalResponse(userId) {
+  const goal = await loadPostingGoal(userId);
+  if (!goal) return { goal: null, progress: null };
+  return { goal, progress: await computePostingGoalProgress(userId, goal) };
+}
+
+app.get(
+  "/posting-goal",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    try {
+      res.json(await buildPostingGoalResponse(getUserId(req)));
+    } catch (err) {
+      sendPostingGoalError(res, err);
+    }
+  })
+);
+
+app.put(
+  "/posting-goal",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const parsed = normalizePostingGoalInput(req.body);
+    if (parsed.error) return res.status(400).json({ message: parsed.error });
+
+    const userId = getUserId(req);
+    const { goal_type, target_count, period } = parsed.value;
+
+    try {
+      await db.query(
+        `INSERT INTO creator_posting_goals (user_id, goal_type, target_count, period)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE goal_type = ?, target_count = ?, period = ?`,
+        [userId, goal_type, target_count, period, goal_type, target_count, period]
+      );
+      res.json(await buildPostingGoalResponse(userId));
+    } catch (err) {
+      sendPostingGoalError(res, err);
+    }
+  })
+);
+
+app.delete(
+  "/posting-goal",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    try {
+      await db.query("DELETE FROM creator_posting_goals WHERE user_id = ?", [getUserId(req)]);
+      res.json({ goal: null, progress: null });
+    } catch (err) {
+      sendPostingGoalError(res, err);
+    }
+  })
+);
 
 // TEST ROUTE
 app.get("/", (req, res) => {
@@ -4011,8 +4434,11 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ message: "Request body is not valid JSON." });
   }
 
-  console.error("DB/SERVER ERROR:", err);
-  res.status(500).json({ message: err.sqlMessage || err.message || "Unexpected server error" });
+   console.error("DB/SERVER ERROR:", err);
+
+  res.status(500).json({
+    message: "An unexpected server error occurred."
+  });
 });
 
 // START SERVER (ALWAYS LAST)

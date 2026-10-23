@@ -1,5 +1,3 @@
-
-
 // ---- in-memory state -------------------------------------------------
 let summaryData = {};
 let topContentData = [];
@@ -19,6 +17,11 @@ let contentOptions = [];   // from GET /content   -> {content_id, title}
 let platformOptions = [];  // from GET /platforms -> {platform_id, platform_name}
 
 let trendChart = null;     // Chart.js instance
+
+// A line/bar "over time" chart needs at least this many real data points
+// before it is drawn; with fewer, a chart would imply a trend that the data
+// cannot support, so an explanatory message with the real values is shown.
+const MIN_TREND_POINTS = 3;
 let editingMetricId = null; // null = "add" mode, otherwise metric_id being edited
 
 // ============================================
@@ -74,6 +77,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const form = document.getElementById("metricForm");
     if (form) form.addEventListener("submit", submitMetricForm);
 
+    setupGoalForm();
     loadFormOptions();
     loadAnalytics();
 });
@@ -148,6 +152,9 @@ async function loadAnalytics() {
         runRenderStep("platform performance table", renderPlatformTable);
         runRenderStep("top performing content", renderTopContent);
         runRenderStep("performance metrics table", renderMetricsTable);
+        // Independent of the Promise.all above: a failure here must not
+        // blank the rest of the page.
+        loadGoalProgress();
     } catch (error) {
         console.error("Analytics load error:", error);
         showPageError(error.message || "Unable to load analytics data. Please try again.");
@@ -372,7 +379,6 @@ function renderSummary() {
     setMetricValue("kpiViews", summaryData.total_views);
     setMetricValue("kpiLikes", summaryData.total_likes);
     setMetricValue("kpiComments", summaryData.total_comments);
-    setMetricValue("kpiShares", summaryData.total_shares);
     setText("kpiEngagement", formatPercent(summaryData.average_engagement_rate));
 }
 
@@ -417,6 +423,239 @@ function renderConsistency() {
     }
     setText("consistencyPublished", formatNumber(consistencyData.publishedCount));
     setText("consistencyMissed", formatNumber(consistencyData.missedCount));
+    if (note) {
+        note.textContent = `Based on ${formatNumber(eligible)} scheduled post${eligible === 1 ? "" : "s"} whose date has passed. ` +
+            "Future and cancelled posts are excluded. This measures whether scheduled posts went out, " +
+            "not progress toward a posting goal.";
+    }
+}
+
+// ============================================
+// POSTING GOAL PROGRESS + GOAL SETTINGS  (GET/PUT/DELETE /posting-goal)
+// The server stores one goal per creator and works out progress: published
+// posts today / this week / this month, against the creator's target. When
+// there is no goal (or goal storage isn't set up yet) no percentage is shown
+// at all — never a made-up 0% or 100%.
+// ============================================
+
+let postingGoal = null;            // { goal_type, target_count, period } or null
+let goalStorageAvailable = true;   // false once the API reports the migration hasn't run
+
+const GOAL_MAX_TARGET = { day: 20, week: 50, month: 200 };
+
+function describePostingGoal(goal) {
+    if (goal.goal_type === "daily") return "Daily posting (1 post per day)";
+    const text = `${formatNumber(goal.target_count)} post${goal.target_count === 1 ? "" : "s"} per ${goal.period}`;
+    return goal.goal_type === "custom" ? `${text} (custom)` : text;
+}
+
+function renderGoalProgress(data) {
+    const valueEl = document.getElementById("goalProgressValue");
+    const countEl = document.getElementById("goalProgressCount");
+    const countLabelEl = document.getElementById("goalProgressCountLabel");
+    const detailEl = document.getElementById("goalProgressDetail");
+    const editBtn = document.getElementById("goalEditBtn");
+    if (!valueEl || !countEl || !countLabelEl || !detailEl) return;
+
+    postingGoal = data && data.goal ? data.goal : null;
+    // Don't re-show the Edit button while the form is open (e.g. after Refresh).
+    const goalForm = document.getElementById("goalForm");
+    const formOpen = !!goalForm && goalForm.style.display === "flex";
+    if (editBtn && !formOpen) editBtn.style.display = "inline-block";
+
+    const progress = data && data.progress ? data.progress : null;
+
+    if (!postingGoal || !progress) {
+        valueEl.textContent = "—";
+        countEl.textContent = "—";
+        countLabelEl.textContent = "Published";
+        detailEl.textContent = "You haven't set a posting goal yet. Set one to see how much of it you've reached.";
+        if (editBtn) editBtn.textContent = "Set posting goal";
+        return;
+    }
+
+    valueEl.textContent = `${progress.percentage}%`;
+    countEl.textContent = formatNumber(progress.published_count);
+    countLabelEl.textContent = `Published ${progress.window_label}`;
+    detailEl.textContent =
+        `${formatNumber(progress.published_count)} of ${formatNumber(progress.target_count)} ` +
+        `post${progress.target_count === 1 ? "" : "s"} published ${progress.window_label}. ` +
+        `Goal: ${describePostingGoal(postingGoal)}.` +
+        (progress.percentage >= 100 ? " Goal reached." : "");
+    if (editBtn) editBtn.textContent = "Edit goal";
+}
+
+function renderGoalUnavailable(message) {
+    const valueEl = document.getElementById("goalProgressValue");
+    const countEl = document.getElementById("goalProgressCount");
+    const detailEl = document.getElementById("goalProgressDetail");
+    const editBtn = document.getElementById("goalEditBtn");
+    if (valueEl) valueEl.textContent = "—";
+    if (countEl) countEl.textContent = "—";
+    if (detailEl) detailEl.textContent = message;
+    if (editBtn) editBtn.style.display = "none";
+    closeGoalForm();
+}
+
+async function loadGoalProgress() {
+    try {
+        const response = await fetch(`${API_BASE}/posting-goal`);
+        if (response.status === 503) {
+            const body = await response.json().catch(() => ({}));
+            if (body.code === "POSTING_GOAL_SCHEMA_MISSING") {
+                goalStorageAvailable = false;
+                renderGoalUnavailable(
+                    "Posting goals need a one-time database setup that hasn't been run yet, so a goal can't be saved or measured."
+                );
+                return;
+            }
+        }
+        if (!response.ok) throw new Error("Request failed");
+        goalStorageAvailable = true;
+        renderGoalProgress(await response.json());
+    } catch (error) {
+        console.error("Could not load posting goal progress:", error);
+        renderGoalUnavailable("Could not load your posting goal right now. Try refreshing the page.");
+    }
+}
+
+function goalPeriodForType(type) {
+    if (type === "daily") return "day";
+    if (type === "weekly") return "week";
+    if (type === "monthly") return "month";
+    return document.getElementById("goalPeriod").value;
+}
+
+function syncGoalFormFields() {
+    const type = document.getElementById("goalType").value;
+    const countRow = document.getElementById("goalCountRow");
+    const periodRow = document.getElementById("goalPeriodRow");
+    const countInput = document.getElementById("goalCount");
+
+    if (countRow) countRow.style.display = type === "daily" ? "none" : "flex";
+    if (periodRow) periodRow.style.display = type === "custom" ? "flex" : "none";
+    if (countInput) countInput.max = String(GOAL_MAX_TARGET[goalPeriodForType(type)]);
+}
+
+function showGoalFormError(message) {
+    const el = document.getElementById("goalFormError");
+    if (el) el.textContent = message || "";
+}
+
+function openGoalForm() {
+    const form = document.getElementById("goalForm");
+    if (!form || !goalStorageAvailable) return;
+
+    showGoalFormError("");
+    const typeSelect = document.getElementById("goalType");
+    const countInput = document.getElementById("goalCount");
+    const periodSelect = document.getElementById("goalPeriod");
+
+    if (postingGoal) {
+        typeSelect.value = postingGoal.goal_type;
+        countInput.value = postingGoal.goal_type === "daily" ? "" : postingGoal.target_count;
+        periodSelect.value = postingGoal.period;
+    } else {
+        typeSelect.value = "monthly";
+        countInput.value = "";
+        periodSelect.value = "month";
+    }
+
+    const removeBtn = document.getElementById("goalRemoveBtn");
+    if (removeBtn) removeBtn.style.display = postingGoal ? "inline-block" : "none";
+
+    syncGoalFormFields();
+    form.style.display = "flex";
+    const editBtn = document.getElementById("goalEditBtn");
+    if (editBtn) editBtn.style.display = "none";
+    typeSelect.focus();
+}
+
+function closeGoalForm() {
+    const form = document.getElementById("goalForm");
+    if (form) form.style.display = "none";
+    const editBtn = document.getElementById("goalEditBtn");
+    if (editBtn && goalStorageAvailable) editBtn.style.display = "inline-block";
+}
+
+async function submitGoalForm(event) {
+    event.preventDefault();
+    showGoalFormError("");
+
+    const type = document.getElementById("goalType").value;
+    const saveBtn = document.getElementById("goalSaveBtn");
+    const payload = { goal_type: type };
+
+    if (type !== "daily") {
+        const rawCount = document.getElementById("goalCount").value.trim();
+        const count = Number(rawCount);
+        const period = goalPeriodForType(type);
+        const max = GOAL_MAX_TARGET[period];
+        if (rawCount === "" || !Number.isInteger(count) || count < 1 || count > max) {
+            showGoalFormError(`Enter a whole number of posts per ${period} between 1 and ${max}.`);
+            return;
+        }
+        payload.target_count = count;
+    }
+    if (type === "custom") payload.period = document.getElementById("goalPeriod").value;
+
+    if (saveBtn) saveBtn.disabled = true;
+    try {
+        const response = await fetch(`${API_BASE}/posting-goal`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(body.message || "Could not save your posting goal.");
+        }
+        renderGoalProgress(body);
+        closeGoalForm();
+    } catch (error) {
+        showGoalFormError(error.message || "Could not save your posting goal.");
+    } finally {
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
+async function removePostingGoal() {
+    if (!window.confirm("Remove your posting goal? Your published posts and schedule are not affected.")) return;
+
+    const removeBtn = document.getElementById("goalRemoveBtn");
+    if (removeBtn) removeBtn.disabled = true;
+    showGoalFormError("");
+    try {
+        const response = await fetch(`${API_BASE}/posting-goal`, { method: "DELETE" });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.message || "Could not remove your posting goal.");
+        renderGoalProgress(body);
+        closeGoalForm();
+    } catch (error) {
+        showGoalFormError(error.message || "Could not remove your posting goal.");
+    } finally {
+        if (removeBtn) removeBtn.disabled = false;
+    }
+}
+
+function setupGoalForm() {
+    const editBtn = document.getElementById("goalEditBtn");
+    if (editBtn) editBtn.addEventListener("click", openGoalForm);
+
+    const typeSelect = document.getElementById("goalType");
+    if (typeSelect) typeSelect.addEventListener("change", syncGoalFormFields);
+
+    const periodSelect = document.getElementById("goalPeriod");
+    if (periodSelect) periodSelect.addEventListener("change", syncGoalFormFields);
+
+    const form = document.getElementById("goalForm");
+    if (form) form.addEventListener("submit", submitGoalForm);
+
+    const cancelBtn = document.getElementById("goalCancelBtn");
+    if (cancelBtn) cancelBtn.addEventListener("click", closeGoalForm);
+
+    const removeBtn = document.getElementById("goalRemoveBtn");
+    if (removeBtn) removeBtn.addEventListener("click", removePostingGoal);
 }
 
 function renderConsistencyPlatformTable() {
@@ -447,7 +686,18 @@ function renderConsistencyTrendChart() {
     const emptyState = document.getElementById("consistencyTrendEmpty");
     if (!canvas) return;
 
-    if (!Array.isArray(trendConsistencyData) || trendConsistencyData.length === 0) {
+    const adherenceRows = Array.isArray(trendConsistencyData) ? trendConsistencyData : [];
+    const adherencePoints = adherenceRows.filter(
+        row => row.consistencyPercentage !== null && row.consistencyPercentage !== undefined
+    );
+    if (adherencePoints.length < MIN_TREND_POINTS) {
+        if (emptyState) {
+            emptyState.textContent = adherencePoints.length === 0
+                ? "No completed publishing deadlines yet, so there is no schedule adherence history to chart."
+                : `Only ${adherencePoints.length} period${adherencePoints.length === 1 ? "" : "s"} with completed deadlines so far ` +
+                  `(${adherencePoints.map(row => `${row.period}: ${row.consistencyPercentage}%`).join(", ")}). ` +
+                  `A chart over time needs at least ${MIN_TREND_POINTS} periods, so no trend is shown yet.`;
+        }
         canvas.style.display = "none";
         if (emptyState) emptyState.style.display = "block";
         if (consistencyTrendChart) {
@@ -472,7 +722,8 @@ function renderConsistencyTrendChart() {
     if (emptyState) emptyState.style.display = "none";
 
     const labels = trendConsistencyData.map(row => row.period);
-    const values = trendConsistencyData.map(row => row.consistencyPercentage === null ? 0 : row.consistencyPercentage);
+    // null stays null (Chart.js leaves a gap) — "no data" must never be drawn as 0%.
+    const values = trendConsistencyData.map(row => row.consistencyPercentage === null ? null : row.consistencyPercentage);
 
     if (consistencyTrendChart) {
         consistencyTrendChart.data.labels = labels;
@@ -486,7 +737,7 @@ function renderConsistencyTrendChart() {
         data: {
             labels,
             datasets: [{
-                label: "Consistency %",
+                label: "Schedule adherence %",
                 data: values,
                 backgroundColor: "#8D93CB",
                 borderRadius: 4,
@@ -499,7 +750,7 @@ function renderConsistencyTrendChart() {
                 legend: { display: false },
                 tooltip: {
                     callbacks: {
-                        label: (ctx) => `${ctx.parsed.y}% consistency`,
+                        label: (ctx) => `${ctx.parsed.y}% schedule adherence`,
                     },
                 },
             },
@@ -685,7 +936,13 @@ function renderSubscriberChart() {
 
     if (!canvas) return;
 
-    if (history.length < 2) {
+    if (history.length < MIN_TREND_POINTS) {
+        if (emptyState) {
+            emptyState.textContent = history.length === 0
+                ? "No subscriber history yet. Sync your YouTube subscribers to record the first snapshot."
+                : `Only ${history.length} subscriber snapshot${history.length === 1 ? "" : "s"} recorded so far. ` +
+                  `A chart over time needs at least ${MIN_TREND_POINTS} syncs; until then the figures above are the real values.`;
+        }
         canvas.style.display = "none";
         if (emptyState) emptyState.style.display = "block";
         if (subscriberChart) {
@@ -773,7 +1030,16 @@ function renderTrendChart() {
     const emptyState = document.getElementById("trendEmpty");
     if (!canvas) return;
 
-    if (!Array.isArray(trendData) || trendData.length === 0) {
+    const syncRows = Array.isArray(trendData) ? trendData : [];
+    if (syncRows.length < MIN_TREND_POINTS) {
+        if (emptyState) {
+            const latest = syncRows[syncRows.length - 1];
+            emptyState.textContent = syncRows.length === 0
+                ? "No performance data available yet. Sync a video's analytics from the Content Planner to record the first snapshot."
+                : `Only ${syncRows.length} sync date${syncRows.length === 1 ? "" : "s"} recorded so far ` +
+                  `(latest: ${formatDateLabel(latest.date)}, ${formatNumber(latest.views)} lifetime views recorded). ` +
+                  `A chart needs at least ${MIN_TREND_POINTS} sync dates. These totals are lifetime snapshots, not views gained per day.`;
+        }
         canvas.style.display = "none";
         if (emptyState) emptyState.style.display = "block";
         if (trendChart) {
@@ -812,20 +1078,17 @@ function renderTrendChart() {
         return;
     }
 
+    // Bars (not a filled line): each bar is a lifetime-total snapshot for one
+    // sync date, not a quantity that accumulated during that day.
     trendChart = new Chart(canvas.getContext("2d"), {
-        type: "line",
+        type: "bar",
         data: {
             labels,
             datasets: [{
-                label: "Views",
+                label: "Lifetime views recorded",
                 data: views,
-                borderColor: "#8D93CB",
-                backgroundColor: "rgba(141, 147, 203, 0.15)",
-                borderWidth: 2,
-                tension: 0.25,
-                pointRadius: 3,
-                pointBackgroundColor: "#8D93CB",
-                fill: true,
+                backgroundColor: "#8D93CB",
+                borderRadius: 4,
             }],
         },
         options: {
@@ -835,7 +1098,7 @@ function renderTrendChart() {
                 legend: { display: false },
                 tooltip: {
                     callbacks: {
-                        label: (ctx) => `${formatNumber(ctx.parsed.y)} views`,
+                        label: (ctx) => `${formatNumber(ctx.parsed.y)} lifetime views recorded`,
                     },
                 },
             },
@@ -880,7 +1143,6 @@ function renderPlatformTable() {
             <td>${formatNumber(row.total_views)}</td>
             <td>${formatNumber(row.total_likes)}</td>
             <td>${formatNumber(row.total_comments)}</td>
-            <td>${formatNumber(row.total_shares)}</td>
             <td>${formatPercent(row.average_engagement_rate)}</td>
         </tr>
     `).join("");
@@ -913,8 +1175,7 @@ function renderTopContent() {
                     <span class="platform-pill">${escapeHTML(item.platform_name || "Unknown")}</span>
                     ${formatNumber(item.views)} views ·
                     ${formatNumber(item.likes)} likes ·
-                    ${formatNumber(item.comments)} comments ·
-                    ${formatNumber(item.shares)} shares
+                    ${formatNumber(item.comments)} comments
                 </div>
             </div>
             <div class="top-content-engagement">
@@ -950,7 +1211,6 @@ function renderMetricsTable() {
             <td>${formatNumber(metric.views)}</td>
             <td>${formatNumber(metric.likes)}</td>
             <td>${formatNumber(metric.comments)}</td>
-            <td>${formatNumber(metric.shares)}</td>
             <td>${formatPercent(metric.engagement_rate)}</td>
             <td>${formatDateTime(metric.recorded_at)}</td>
             <td class="metrics-actions">
