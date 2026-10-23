@@ -7,54 +7,117 @@
     <link rel="stylesheet" href="style.css">
     <script src="auth-guard.js"></script>
     <style>
-        /* Page-local styles only; style.css is not modified. */
-        .onboard-page { max-width: 520px; margin: 6vh auto; padding: 2rem; border: 1px solid #ddd; border-radius: 8px; }
-        .onboard-page h1 { margin-top: 0; font-size: 1.4rem; }
-        .onboard-page label { display: block; margin-top: 1rem; font-size: 0.9rem; }
-        .onboard-page input, .onboard-page textarea { width: 100%; padding: 0.5rem; margin-top: 0.25rem; box-sizing: border-box; font: inherit; }
-        .onboard-page button { padding: 0.5rem 0.9rem; cursor: pointer; }
+        /* Page-local layout only. Colours, focus and dropdown styles come from
+           style.css. Element ids are unchanged, so onboarding.js is untouched. */
+        .onboard-page { max-width: 600px; margin: 4vh auto; padding: 0 16px 32px; }
+        .onboard-header { background: var(--cc-charcoal); color: var(--cc-page); padding: 24px 28px; border-radius: 14px 14px 0 0; border-bottom: 5px solid var(--cc-pink); }
+        .onboard-header h1 { margin: 0 0 6px; font-size: 1.5rem; color: var(--cc-pink); }
+        .onboard-header p { margin: 0; font-size: 0.95rem; }
+        .onboard-body { background: var(--cc-page); border: 1px solid var(--cc-blush); border-top: 0; border-radius: 0 0 14px 14px; padding: 8px 24px 24px; }
+
+        .onboard-guide { margin: 18px 0 6px; padding: 14px 16px 12px; background: var(--cc-blush); border-radius: 10px; border-left: 5px solid var(--cc-charcoal); }
+        .onboard-guide h2 { margin: 0 0 6px; font-size: 1rem; }
+        .onboard-guide p { margin: 0 0 4px; font-size: 0.9rem; }
+        .onboard-guide ul { list-style: disc; margin: 0; padding: 0 0 0 20px; }
+        .onboard-guide li { padding: 3px 0; font-size: 0.9rem; line-height: 1.45; cursor: default; }
+        .onboard-guide li:hover { opacity: 1; }
+        .onboard-guide li::marker { color: var(--cc-charcoal); }
+
+        .onboard-section { margin-top: 22px; padding: 16px 18px 18px; background: #fff; border: 1px solid var(--cc-blush); border-top: 4px solid var(--cc-pink); border-radius: 10px; }
+        .onboard-section:nth-of-type(2) { border-top-color: var(--cc-sage); }
+        .onboard-section h2 { margin: 0 0 4px; font-size: 1.05rem; }
+        .onboard-hint { margin: 0 0 4px; font-size: 0.85rem; color: var(--cc-muted); }
+
+        .onboard-page label { display: block; margin-top: 1rem; font-size: 0.9rem; font-weight: 600; color: var(--cc-charcoal); }
+        .onboard-page input, .onboard-page textarea, .onboard-page select { width: 100%; padding: 0.55rem 0.6rem; margin-top: 0.25rem; box-sizing: border-box; font: inherit; font-weight: 400; color: var(--cc-ink); background-color: #fff; border: 1.5px solid var(--cc-charcoal); border-radius: 6px; }
+        .onboard-page select { padding-right: 34px; margin-right: 0; }
+        .onboard-page textarea { resize: vertical; }
+        .onboard-page button { padding: 0.55rem 1rem; cursor: pointer; }
+
         .topic-row { display: flex; gap: 0.5rem; align-items: flex-end; }
         .topic-row label { flex: 1; margin-top: 1rem; }
-        .topic-chips { list-style: none; padding: 0; margin: 0.75rem 0 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
-        .topic-chips li { border: 1px solid #ccc; border-radius: 999px; padding: 0.2rem 0.3rem 0.2rem 0.75rem; display: inline-flex; align-items: center; gap: 0.35rem; }
-        .topic-chips button { border: 0; background: transparent; padding: 0 0.4rem; font-size: 1rem; line-height: 1; }
-        .onboard-msg { margin-top: 1rem; font-size: 0.85rem; min-height: 1.2em; }
-        .onboard-msg.error { color: #b00020; }
+        #addTopicBtn { background: var(--cc-pink); font-weight: 600; }
+        #addTopicBtn:hover { background: var(--cc-charcoal); }
+
+        .topic-chips { list-style: none; padding: 0; margin: 0.9rem 0 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+        .topic-chips li { background: var(--cc-pink); color: var(--cc-charcoal); font-weight: 600; font-size: 0.9rem; border: 1.5px solid var(--cc-charcoal); border-radius: 999px; padding: 0.2rem 0.3rem 0.2rem 0.8rem; display: inline-flex; align-items: center; gap: 0.35rem; cursor: default; }
+        .topic-chips li:hover { opacity: 1; }
+        .topic-chips button { border: 0; background: transparent; color: var(--cc-charcoal); padding: 0 0.45rem; font-size: 1.1rem; line-height: 1.4; border-radius: 999px; }
+        .topic-chips button:hover { background: var(--cc-charcoal); color: var(--cc-pink); }
+
+        .onboard-msg { margin-top: 1rem; font-size: 0.9rem; min-height: 1.2em; }
+        .onboard-msg.error { color: #a0001c; }
         .onboard-msg.ok { color: #1b6e2d; }
-        #finishBtn { margin-top: 1.5rem; width: 100%; padding: 0.6rem; }
+
+        #finishBtn { margin-top: 1.25rem; width: 100%; padding: 0.8rem; font-size: 1rem; font-weight: 700; background: var(--cc-charcoal); color: var(--cc-page); box-shadow: 0 4px 0 var(--cc-pink); }
+        #finishBtn:hover { background: #6a2a20; }
+        #finishBtn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        @media (max-width: 480px) {
+            .onboard-header { padding: 18px; }
+            .onboard-body { padding: 4px 12px 20px; }
+            .topic-row { flex-direction: column; align-items: stretch; }
+        }
     </style>
 </head>
 <body>
 <div class="onboard-page">
-    <h1 id="pageTitle">Set up your creator profile</h1>
-    <p id="pageIntro">Tell us a little about your content. You can change this later.</p>
-
-    <div id="loadError" class="onboard-msg error is-hidden" role="alert">
-        <span id="loadErrorText"></span>
-        <button type="button" id="retryBtn">Retry</button>
+    <div class="onboard-header">
+        <h1 id="pageTitle">Set up your creator profile</h1>
+        <p id="pageIntro">Tell us a little about your content. You can change this later.</p>
     </div>
 
-    <div id="formArea" class="is-hidden">
-        <label for="displayName">Display name *
-            <input type="text" id="displayName" maxlength="100" autocomplete="nickname">
-        </label>
-        <label for="primaryNiche">Primary niche
-            <input type="text" id="primaryNiche" maxlength="100" placeholder="e.g. Faith and personal growth">
-        </label>
-        <label for="bio">Short bio
-            <textarea id="bio" rows="3" maxlength="500"></textarea>
-        </label>
-
-        <div class="topic-row">
-            <label for="topicInput">Content topics * (add at least one)
-                <input type="text" id="topicInput" maxlength="60" placeholder="e.g. Bible study">
-            </label>
-            <button type="button" id="addTopicBtn">Add</button>
+    <div class="onboard-body">
+        <div id="loadError" class="onboard-msg error is-hidden" role="alert">
+            <span id="loadErrorText"></span>
+            <button type="button" id="retryBtn">Retry</button>
         </div>
-        <ul class="topic-chips" id="topicList" aria-label="Your topics"></ul>
 
-        <div id="message" class="onboard-msg" role="status"></div>
-        <button type="button" id="finishBtn">Finish setup</button>
+        <div id="formArea" class="is-hidden">
+            <div class="onboard-guide">
+                <h2>Before you start</h2>
+                <p>Fields marked with * are required.</p>
+                <ul>
+                    <li>Enter a display name.</li>
+                    <li>Add at least one content topic.</li>
+                    <li>Choose a topic from the list, then select <strong>Add</strong>.</li>
+                    <li>Remove a topic with the × on its tag.</li>
+                    <li>You can change all of this later.</li>
+                </ul>
+            </div>
+
+            <section class="onboard-section" aria-labelledby="aboutHeading">
+                <h2 id="aboutHeading">About you</h2>
+                <label for="displayName">Display name *
+                    <input type="text" id="displayName" maxlength="100" autocomplete="nickname">
+                </label>
+                <label for="bio">Short bio
+                    <textarea id="bio" rows="3" maxlength="500"></textarea>
+                </label>
+            </section>
+
+            <section class="onboard-section" aria-labelledby="contentHeading">
+                <h2 id="contentHeading">Your content</h2>
+                <label for="primaryNiche">Primary niche
+                    <select id="primaryNiche">
+                        <option value="">Select a niche…</option>
+                    </select>
+                </label>
+
+                <div class="topic-row">
+                    <label for="topicSelect">Content topics * (add at least one)
+                        <select id="topicSelect">
+                            <option value="">Select a topic…</option>
+                        </select>
+                    </label>
+                    <button type="button" id="addTopicBtn">Add</button>
+                </div>
+                <ul class="topic-chips" id="topicList" aria-label="Your topics"></ul>
+            </section>
+
+            <div id="message" class="onboard-msg" role="status"></div>
+            <button type="button" id="finishBtn">Finish setup</button>
+        </div>
     </div>
 </div>
 <script src="onboarding.js"></script>

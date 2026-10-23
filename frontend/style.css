@@ -1,13 +1,58 @@
 /* =========================
+THEME TOKENS (Phase 3)
+Your six palette colours plus the neutrals the app already used.
+Platform colours live here too so every page and chart shares them.
+========================= */
+
+:root {
+  --cc-charcoal: #313135;
+  --cc-pink: #FFDBED;
+  --cc-blush: #dec3f0;
+  --cc-cream: #e9dfd5;
+  --cc-bluegrey: #8d93cb;
+  --cc-sage: #a5b9aa;
+
+  --cc-page: #fff6ee;      /* existing page background */
+  --cc-soft: #f9efe4;      /* existing soft panel background */
+  --cc-ink: #313135;       /* existing body text */
+  --cc-muted: #7a6f6f;     /* existing secondary text */
+  --cc-line: #98989d;      /* existing neutral border */
+
+  --cc-youtube: #CD201F;
+  --cc-tiktok-cyan: #25F4EE;
+  --cc-tiktok-pink: #FE2C55;
+  --cc-tiktok-ink: #161823;
+  --cc-insta-purple: #833AB4;
+  --cc-insta-pink: #C13584;
+  --cc-insta-orange: #BF4A15;
+
+  --cc-focus: 3px solid #313135;
+}
+
+/* =========================
 GLOBAL STYLES
 ========================= */
 
 body{
 /*background-image:url(images/Untitled\ design\ \(3\).png); */
-background-color: #fff6ee;
-color:#313135;
+background-color: var(--cc-page);
+color: var(--cc-ink);
 margin:0;
 font-family:Arial, sans-serif;
+}
+
+h1, h2, h3 {
+  color: #313135;
+}
+
+/* One visible focus style for keyboard users, everywhere. */
+:focus-visible {
+  outline: var(--cc-focus);
+  outline-offset: 2px;
+}
+
+.sidePanel :focus-visible {
+  outline-color: var(--cc-pink);
 }
 
 .parent-all {
@@ -75,8 +120,10 @@ opacity:0.7;
 }
 
 .activeTab{
-    color: #FFDBED;
+    color: var(--cc-pink);
     font-weight: bold;
+    border-left: 3px solid var(--cc-pink);
+    padding-left: 10px;
 }
 
 /* =========================
@@ -85,9 +132,13 @@ SIDEBAR
 
 .sidePanel{
 grid-row: span 5 / span 5;
-background:#313135;
-color:#fff6ee;
+background: #313135;
+color: var(--cc-page);
 padding:20px;
+}
+
+.sidePanel h2 {
+color: var(--cc-pink);
 }
 
 .sidePanel a{
@@ -119,18 +170,18 @@ DASHBOARD PAGE
 }
 
 .youtube-platformAnalytics{
-    border-color: #CD201F ;
-    color: #ff3131;
+    border-color: var(--cc-youtube);
+    color: var(--cc-youtube);
 }
 
 .tiktok-platformAnalytics{
-    border-color: #7ad3d6;
-    color: #0fd3da;
+    border-color: var(--cc-tiktok-cyan);
+    color: var(--cc-tiktok-ink);
 }
 
 .instagram-platformAnalytics{
-    border-color: #6228D7;
-    color: #5e17eb;
+    border-color: var(--cc-insta-purple);
+    color: var(--cc-insta-purple);
 }
 
 
@@ -202,29 +253,110 @@ BUTTONS
 button{
 background-color: transparent;
 border: 1.5px solid #313135;
-color:#313135;
+color: #313135;
 padding:10px 15px;
 border-radius:8px;
 cursor:pointer;
 transition:0.3s;
 }
 
+.quick-action-btn
+
 button:hover, .allToggle:focus{
-background-color: #313135;
-color: #fff6ee;
+background-color: var(--cc-charcoal);
+color: var(--cc-bluegrey);
+}
+
+/* Shared link/button styles for the public pages (welcome, tutorial).
+   --primary is the filled main action, --secondary the blush alternative. */
+.btn {
+display: inline-block;
+padding: 12px 24px;
+border: 1.5px solid var(--cc-charcoal);
+border-radius: 8px;
+color: var(--cc-charcoal);
+background: transparent;
+font-size: 15px;
+font-weight: 600;
+text-decoration: none;
+cursor: pointer;
+transition: 0.3s;
+}
+
+.btn:hover, .btn:focus-visible {
+background: var(--cc-charcoal);
+}
+
+.btn--primary {
+background: var(--cc-charcoal);
+color: var(--cc-page);
+box-shadow: 0 4px 0 var(--cc-pink);
+}
+
+.btn--primary:hover, .btn--primary:focus-visible {
+background: transparent;
+border-color: var(--cc-charcoal);
+color: var(--cc-charcoal);
+}
+
+.btn--secondary {
+background: var(--cc-pink);
+border-color: var(--cc-charcoal);
+}
+
+.btn--secondary:hover, .btn--secondary:focus-visible {
+background: transparent;
+border-color: var(--cc-charcoal);
+color: var(--cc-charcoal);
 }
 
 button:active{
     opacity: 0.7;
 }
 
-select{
-padding:8px 10px;
-border-radius:6px;
-background-color: transparent;
-border: 1px solid #313135;
+#authSubmit:hover, #authSubmit:focus-visible {
+    background-color: var(--cc-charcoal);
+    color: var(--cc-page);
 
+}
+
+select{
+padding:8px 34px 8px 10px;
+border-radius:6px;
+background-color: var(--cc-page);
+color: var(--cc-ink);
+border: 1.5px solid var(--cc-charcoal);
 margin-right:8px;
+cursor: pointer;
+-webkit-appearance: none;
+appearance: none;
+background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%234e1e17' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+background-repeat: no-repeat;
+background-position: right 11px center;
+}
+
+select:hover {
+background-color: var(--cc-blush);
+}
+
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+outline: var(--cc-focus);
+outline-offset: 1px;
+border-color: var(--cc-charcoal);
+}
+
+/* Open-list colours. Browsers style the native popup themselves, so this
+   is best-effort (it works in Chrome/Edge/Firefox on Windows). */
+select option {
+background: var(--cc-page);
+color: var(--cc-ink);
+}
+
+select option:checked {
+background: var(--cc-pink);
+color: var(--cc-charcoal);
 }
 
 
@@ -315,18 +447,18 @@ SCRIPTS PAGE
 
 /* ================== ADD FOLDER ================== */
 .addFolder {
-  background-color: #FFDBED;
-  color: #3131358c;
+  background-color: var(--cc-blush);
+  color: var(--cc-charcoal);
   padding: 20px;
   margin: 0;
-  border: 2px dashed #3131358c;
+  border: 2px dashed var(--cc-charcoal);
   transition: all 0.3s ease;
 }
 
 .addFolder:hover {
-  background-color: #ffe6f1;
-  border-color: #313135;
-  color: #313135;
+  background-color: var(--cc-pink);
+  border-color: var(--cc-charcoal);
+  color: var(--cc-charcoal);
 }
 
 /* ================== TEXT ================== */
@@ -463,12 +595,13 @@ background-color: #FFF6EE;
 }
 
 #saveEvent{
-    background-color: #8D93CB;
+    background-color: var(--cc-pink);
+    border-color: var(--cc-charcoal);
     font-weight: bold;
 }
 
 #saveEvent:hover{
-    background-color: #797fb4;
+    background-color: var(--cc-charcoal);
 }
 
 #createScript:hover{
@@ -667,8 +800,41 @@ font-weight:bold;
   margin-right: 4px;
   border-radius: 10px;
   font-size: 11px;
-  background: #f0e1d4;
-  color: #313135;
+  background: var(--cc-cream);
+  color: var(--cc-charcoal);
+}
+
+.platform-pill {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  background: var(--cc-cream);
+  color: var(--cc-charcoal);
+}
+
+/* Platform badges/pills (modifier classes added by the page scripts). The
+   same three looks are used on Dashboard, Analytics and the planner. */
+.platform-pill--youtube,
+.platform-badge--youtube {
+  background: var(--cc-youtube);
+  color: #fff;
+  font-weight: 700;
+}
+
+.platform-pill--tiktok,
+.platform-badge--tiktok {
+  background: var(--cc-tiktok-ink);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: inset 3px 0 0 var(--cc-tiktok-cyan), inset -3px 0 0 var(--cc-tiktok-pink);
+}
+
+.platform-pill--instagram,
+.platform-badge--instagram {
+  background: linear-gradient(90deg, var(--cc-insta-purple), var(--cc-insta-pink), var(--cc-insta-orange));
+  color: #fff;
+  font-weight: 700;
 }
 
 
@@ -685,14 +851,14 @@ font-weight:bold;
 
 .status-badge.status-scheduled,
 .event-item.status-scheduled .status-dot {
-  background-color: #8D93CB;
-  color: #fff6ee;
+  background-color: var(--cc-bluegrey);
+  color: var(--cc-charcoal);
 }
 
 .status-badge.status-published,
 .event-item.status-published .status-dot {
-  background-color: #4d6b4d;
-  color: #fff6ee;
+  background-color: var(--cc-sage);
+  color: var(--cc-charcoal);
 }
 
 .status-badge.status-missed,
@@ -915,7 +1081,7 @@ WRITING
 
 .write-header h1 {
     font-size: 32px;
-    color: #313135;
+    color: var(--cc-charcoal);
 }
 
 .write-header p {
@@ -1095,9 +1261,9 @@ YOUTUBE SUBSCRIBER ANALYTICS
   font-weight: 600;
   padding: 6px 12px;
   border-radius: 999px;
-  border: 1px solid #98989d;
-  color: #7a6f6f;
-  background: #f9efe4;
+  border: 1px solid var(--cc-line);
+  color: var(--cc-muted);
+  background: var(--cc-soft);
 }
 
 .youtube-connection-badge--checking {
@@ -1183,8 +1349,9 @@ DASHBOARD OVERVIEW
 }
 
 .dashboard-summary-card {
-  background: #fff6ee;
-  border: 1px solid #98989d;
+  background: var(--cc-page);
+  border: 1px solid var(--cc-blush);
+  border-top: 4px solid var(--cc-pink);
   padding: 18px;
   min-height: 92px;
   box-sizing: border-box;
@@ -1201,8 +1368,12 @@ DASHBOARD OVERVIEW
 .dashboard-metric-value {
   font-size: 28px;
   font-weight: 700;
-  color: #313135;
+  color: var(--cc-charcoal);
 }
+
+/* Summary cards: a calm rotation of three palette accents, not a rainbow. */
+.dashboard-summary-card:nth-child(3n+2) { border-top-color: var(--cc-sage); }
+.dashboard-summary-card:nth-child(3n+3) { border-top-color: var(--cc-bluegrey); }
 
 .dashboard-summary-sub {
   font-size: 12px;
@@ -1212,8 +1383,9 @@ DASHBOARD OVERVIEW
 
 /* ---- Generic card (Upcoming Content / Platform Overview / Performance / Quick Actions) ---- */
 .dashboard-card {
-  background: #fff6ee;
-  border: 1px solid #98989d;
+  background: var(--cc-page);
+  border: 1px solid var(--cc-blush);
+  border-top: 4px solid var(--cc-pink);
   padding: 18px;
   min-width: 0;
   overflow-wrap: anywhere;
@@ -1223,6 +1395,7 @@ DASHBOARD OVERVIEW
 .dashboard-card h3 {
   margin: 0 0 5px;
   font-size: 17px;
+  color: var(--cc-charcoal);
 }
 
 .dashboard-card > p {
@@ -1254,8 +1427,8 @@ DASHBOARD OVERVIEW
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  background: #f9efe4;
-  border-left: 4px solid #8D93CB;
+  background: var(--cc-soft);
+  border-left: 4px solid var(--cc-bluegrey);
 }
 
 .dashboard-upcoming-title {
@@ -1306,7 +1479,7 @@ DASHBOARD OVERVIEW
   align-items: center;
   gap: 10px;
   padding: 12px 0;
-  border-bottom: 1px solid #f0e1d4;
+  border-bottom: 1px solid var(--cc-blush);
 }
 
 .dashboard-platform-row:last-child {
@@ -1318,11 +1491,16 @@ DASHBOARD OVERVIEW
   font-size: 14px;
 }
 
-/* Colours reused verbatim from the existing .youtube/.tiktok/.instagram
-   -platformAnalytics rules above — no new colours introduced. */
-.dashboard-platform-name--youtube { color: #ff3131; }
-.dashboard-platform-name--tiktok { color: #0fd3da; }
-.dashboard-platform-name--instagram { color: #5e17eb; }
+/* Platform names. Text uses the darker readable shade of each brand colour;
+   TikTok's cyan is too light for text on cream, so it is an underline accent. */
+.dashboard-platform-name--youtube { color: var(--cc-youtube); }
+.dashboard-platform-name--tiktok {
+  color: var(--cc-tiktok-ink);
+  border-bottom: 3px solid var(--cc-tiktok-cyan);
+  box-shadow: 0 3px 0 var(--cc-tiktok-pink);
+  padding-bottom: 1px;
+}
+.dashboard-platform-name--instagram { color: var(--cc-insta-purple); }
 
 .platform-status-badge {
   font-size: 12px;
@@ -1386,8 +1564,8 @@ DASHBOARD OVERVIEW
 .quick-action-btn {
   display: inline-block;
   background-color: transparent;
-  border: 1.5px solid #313135;
-  color: #313135;
+  border: 1.5px solid var(--cc-charcoal);
+  color: var(--cc-charcoal);
   padding: 10px 15px;
   border-radius: 8px;
   cursor: pointer;
@@ -1397,14 +1575,13 @@ DASHBOARD OVERVIEW
 }
 
 .quick-action-btn:hover {
-  background-color: #313135;
-  color: #fff6ee;
+  background-color: var(--cc-charcoal);
+  color: var(--cc-page);
 }
 
 /* ---- Missed opportunities ---- */
 .dashboard-opportunity-list,
-.dashboard-recommendation-list,
-.dashboard-competitor-list {
+.dashboard-recommendation-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1484,8 +1661,8 @@ DASHBOARD OVERVIEW
 /* ---- Recommendations ---- */
 .dashboard-recommendation-item {
   padding: 12px;
-  background: #f9efe4;
-  border-left: 4px solid #8D93CB;
+  background: var(--cc-soft);
+  border-left: 4px solid var(--cc-sage);
 }
 
 .dashboard-recommendation-type {
@@ -1512,16 +1689,6 @@ DASHBOARD OVERVIEW
   flex-direction: row;
   align-items: center;
   margin-top: 8px;
-}
-
-/* ---- Competitors ---- */
-.dashboard-competitor-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  background: #f9efe4;
 }
 
 .dashboard-inline-form {
@@ -1577,7 +1744,7 @@ DASHBOARD OVERVIEW
    that hover state instead of a new colour. */
 .script-filter-btn.active {
   background-color: #313135;
-  color: #fff6ee;
+  color: var(--cc-page);
 }
 
 /* ================== GENERIC HIDDEN-STATE UTILITY ================== */
@@ -1586,4 +1753,82 @@ DASHBOARD OVERVIEW
    rule, so toggling it had no visible effect. */
 .hidden {
   display: none;
+}
+
+/* ---- write.html category notes (Phase 2) ---- */
+.write-categories-note {
+  font-size: 13px;
+  color: #7a6f6f;
+  margin: 4px 0;
+}
+
+/* =========================
+PHASE 3 — SHARED PAGE PIECES
+Used by index, tutorial and onboarding so those pages carry no duplicate CSS.
+========================= */
+
+.public-topbar {
+  background: #313135;
+  color: var(--cc-page);
+  padding: 16px 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-bottom: 4px solid var(--cc-pink);
+}
+
+.public-topbar strong {
+  font-size: 20px;
+  color: var(--cc-pink);
+}
+
+.public-topbar a {
+  color: var(--cc-page);
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.public-topbar a:hover,
+.public-topbar a:focus-visible {
+  text-decoration: underline;
+}
+
+.public-topbar :focus-visible {
+  outline-color: var(--cc-pink);
+}
+
+.eyebrow {
+  display: inline-block;
+  margin: 0 0 12px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--cc-blush);
+  color: var(--cc-charcoal);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.platform-dots {
+  display: inline-flex;
+  gap: 6px;
+  vertical-align: middle;
+}
+
+.platform-dots i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.platform-dots .dot-youtube { background: var(--cc-youtube); }
+.platform-dots .dot-tiktok { background: var(--cc-tiktok-cyan); box-shadow: 3px 0 0 var(--cc-tiktok-pink); margin-right: 3px; }
+.platform-dots .dot-instagram { background: linear-gradient(135deg, var(--cc-insta-purple), var(--cc-insta-orange)); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
 }

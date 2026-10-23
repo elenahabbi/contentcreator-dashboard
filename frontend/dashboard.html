@@ -26,8 +26,11 @@
         .dashboard-chart-empty {
             padding: 30px 10px;
             text-align: center;
-            color: #7a6f6f;
+            color: var(--cc-muted);
             font-size: 13px;
+            background: var(--cc-soft);
+            border: 1px dashed var(--cc-pink);
+            border-radius: 8px;
         }
 
         .dashboard-chart-caption {
@@ -142,6 +145,7 @@
                 <section class="dashboard-card">
                     <h3>Platform Overview</h3>
                     <p>Which platforms are connected and reporting real data.</p>
+                    <p class="write-categories-note">TikTok and Instagram are not connected. "Sample Data Preview" means illustrative figures on the <a href="analytics.html#crossPlatformSection">Analytics page</a>, not live data.</p>
 
                     <div class="dashboard-platform-row">
                         <span class="dashboard-platform-name dashboard-platform-name--youtube">YouTube</span>
@@ -149,11 +153,11 @@
                     </div>
                     <div class="dashboard-platform-row">
                         <span class="dashboard-platform-name dashboard-platform-name--tiktok">TikTok</span>
-                        <span class="platform-status-badge platform-status-badge--planned">Not available in current MVP</span>
+                        <span id="platformTiktokStatus" class="platform-status-badge platform-status-badge--planned" title="Illustrative sample figures only. No live TikTok connection.">Sample Data Preview</span>
                     </div>
                     <div class="dashboard-platform-row">
                         <span class="dashboard-platform-name dashboard-platform-name--instagram">Instagram</span>
-                        <span class="platform-status-badge platform-status-badge--planned">Not available in current MVP</span>
+                        <span id="platformInstagramStatus" class="platform-status-badge platform-status-badge--planned" title="Illustrative sample figures only. No live Instagram connection.">Sample Data Preview</span>
                     </div>
                 </section>
             </div>

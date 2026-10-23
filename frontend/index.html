@@ -6,45 +6,43 @@
     <title>Welcome | ContentCreator</title>
     <link rel="stylesheet" href="style.css">
 
-    <!-- Welcome-page-only styles. Reuses the app's existing palette
-         (cream #fff6ee, charcoal #313135, muted #7a6f6f, border #98989d)
-         and its outlined-button look; style.css itself is not touched.
+    <!-- Welcome-page-only layout. Colours, buttons, the top bar and badges come
+         from style.css (theme tokens, .btn, .public-topbar, .eyebrow).
          This page is public: it loads no auth-guard.js and makes no API
          calls. Sign In goes to the existing login.html. -->
     <style>
-        .welcome-topbar {
-            background: #313135;
-            color: #fff6ee;
-            padding: 16px 24px;
-        }
-
-        .welcome-topbar strong {
-            font-size: 20px;
-        }
-
         .welcome-page {
             max-width: 960px;
             margin: 0 auto;
-            padding: 48px 24px 32px;
+            padding: 40px 24px 32px;
         }
 
         .welcome-hero {
             text-align: center;
-            margin-bottom: 40px;
+            margin-bottom: 36px;
+            padding: 44px 24px 40px;
+            border-radius: 16px;
+            background: linear-gradient(160deg, var(--cc-blush) 0%, var(--cc-pink) 100%);
+            border: 1px solid var(--cc-pink);
+            border-bottom: 6px solid var(--c-charcoal);
+        }
+
+        .welcome-hero .eyebrow {
+            background: var(--cc-page);
         }
 
         .welcome-hero h1 {
-            font-size: 34px;
-            line-height: 1.2;
+            font-size: clamp(28px, 5vw, 40px);
+            line-height: 1.15;
             margin: 0 0 14px;
         }
 
         .welcome-hero p {
             max-width: 600px;
             margin: 0 auto 26px;
-            color: #7a6f6f;
+            color: var(--c-charcoal);
             font-size: 16px;
-            line-height: 1.5;
+            line-height: 1.55;
         }
 
         .welcome-actions {
@@ -54,39 +52,20 @@
             flex-wrap: wrap;
         }
 
-        .welcome-btn {
-            display: inline-block;
-            padding: 12px 24px;
-            border: 1.5px solid #313135;
-            border-radius: 8px;
-            color: #313135;
-            background: transparent;
-            font-size: 15px;
-            text-decoration: none;
-            cursor: pointer;
-            transition: 0.3s;
+        .welcome-hero .btn--secondary {
+            background: var(--cc-page);
+            border-color: var(--c-charcoal);
         }
 
-        .welcome-btn:hover,
-        .welcome-btn:focus-visible {
-            background: #313135;
-            color: #fff6ee;
+        .welcome-hero .btn--secondary:hover,
+        .welcome-hero .btn--secondary:focus-visible {
+            background: var(--c-charcoal);
         }
 
-        .welcome-btn--primary {
-            background: #313135;
-            color: #fff6ee;
-        }
-
-        .welcome-btn--primary:hover,
-        .welcome-btn--primary:focus-visible {
-            background: transparent;
-            color: #313135;
-        }
-
-        .welcome-btn:focus-visible {
-            outline: 3px solid #8D93CB;
-            outline-offset: 2px;
+        .welcome-platforms {
+            margin-top: 22px;
+            font-size: 13px;
+            color: var(--c-charcoal);
         }
 
         .welcome-features {
@@ -99,12 +78,17 @@
         }
 
         .welcome-feature {
-            background: #fff6ee;
-            border: 1px solid #98989d;
+            background: var(--cc-page);
+            border: 1px solid var(--cc-blush);
+            border-top: 5px solid var(--cc-pink);
             border-radius: 8px;
             padding: 18px;
             cursor: default;
         }
+
+        .welcome-feature:nth-child(4n+2) { border-top-color: var(--cc-sage); }
+        .welcome-feature:nth-child(4n+3) { border-top-color: var(--cc-bluegrey); }
+        .welcome-feature:nth-child(4n+4) { border-top-color: var(--c-charcoal); }
 
         .welcome-feature:hover {
             opacity: 1;
@@ -117,7 +101,7 @@
 
         .welcome-feature p {
             margin: 0;
-            color: #7a6f6f;
+            color: var(--cc-muted);
             font-size: 13px;
             line-height: 1.5;
         }
@@ -125,29 +109,39 @@
         .welcome-footnote {
             margin-top: 32px;
             text-align: center;
-            color: #7a6f6f;
+            color: var(--cc-muted);
             font-size: 13px;
+        }
+
+        .welcome-footnote a {
+            color: var(--c-charcoal);
+            font-weight: 600;
         }
     </style>
 </head>
 <body>
 
-<header class="welcome-topbar">
+<header class="public-topbar">
     <strong>ContentCreator</strong>
 </header>
 
 <main class="welcome-page">
     <section class="welcome-hero">
-        <h1>Plan it. Publish it. See how it's going.</h1>
+        <p class="eyebrow">For creators</p>
+        <h1>Plan smarter. Create consistently.</h1>
         <p>
             ContentCreator is a dashboard for creators. Keep your scripts and
             schedule in one place, check how your content is performing, and
             stay on top of your own posting habits.
         </p>
         <div class="welcome-actions">
-            <a class="welcome-btn welcome-btn--primary" href="login.html">Sign In</a>
-            <a class="welcome-btn" href="tutorial.html">Mini Tutorial</a>
+            <a class="btn btn--primary" href="login.html">Sign In</a>
+            <a class="btn btn--secondary" href="tutorial.html">Mini Tutorial</a>
         </div>
+        <p class="welcome-platforms">
+            <span class="platform-dots" aria-hidden="true"><i class="dot-youtube"></i><i class="dot-tiktok"></i><i class="dot-instagram"></i></span>
+            YouTube, TikTok and Instagram
+        </p>
     </section>
 
     <ul class="welcome-features">

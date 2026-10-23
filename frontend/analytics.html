@@ -49,8 +49,9 @@
         }
 
         .metric-card {
-            background: #fff6ee;
-            border: 1px solid #98989d;
+            background: var(--cc-page);
+            border: 1px solid var(--cc-blush);
+            border-top: 4px solid var(--cc-pink);
             padding: 18px;
             min-height: 92px;
             box-sizing: border-box;
@@ -65,14 +66,15 @@
         .metric-value {
             font-size: 28px;
             font-weight: 700;
-            color: #313135;
+            color: var(--cc-charcoal);
             cursor: default;
         }
 
         /* ---- Generic section card ---- */
         .analytics-card {
-            background: #fff6ee;
-            border: 1px solid #98989d;
+            background: var(--cc-page);
+            border: 1px solid var(--cc-blush);
+            border-top: 4px solid var(--cc-pink);
             padding: 18px;
             min-width: 0;
             border-radius: 8px;
@@ -120,22 +122,19 @@
         .analytics-table td {
             padding: 10px 8px;
             text-align: left;
-            border-bottom: 1px solid #98989d;
+            border-bottom: 1px solid var(--cc-blush);
             white-space: nowrap;
         }
 
         .analytics-table th {
-            color: #7a6f6f;
-            font-weight: 600;
+            color: var(--cc-charcoal);
+            font-weight: 700;
+            background: var(--cc-soft);
         }
 
-        .platform-pill {
-            display: inline-block;
-            padding: 4px 8px;
-            border-radius: 12px;
-            font-size: 11px;
-            background: #f0e1d4;
-        }
+        /* KPI cards: same calm accent rotation as the Dashboard summary cards. */
+        .metric-card:nth-child(3n+2) { border-top-color: var(--cc-sage); }
+        .metric-card:nth-child(3n+3) { border-top-color: var(--cc-bluegrey); }
 
         .metrics-actions {
             display: flex;
@@ -159,14 +158,14 @@
             align-items: center;
             gap: 14px;
             padding: 12px 14px;
-            border-left: 4px solid #8D93CB;
-            background: #f9efe4;
+            border-left: 4px solid var(--cc-bluegrey);
+            background: var(--cc-soft);
             margin-bottom: 8px;
         }
 
         .top-content-item.top-content-first {
-            border-left-color: #FBA9C4;
-            background: #fdeef4;
+            border-left-color: var(--cc-pink);
+            background: var(--cc-blush);
         }
 
         .top-content-rank {
@@ -177,7 +176,7 @@
         }
 
         .top-content-first .top-content-rank {
-            color: #d14976;
+            color: var(--cc-charcoal);
         }
 
         .top-content-body {
@@ -213,8 +212,11 @@
         .empty-state {
             padding: 30px 10px;
             text-align: center;
-            color: #7a6f6f;
+            color: var(--cc-muted);
             font-size: 13px;
+            background: var(--cc-soft);
+            border: 1px dashed var(--cc-pink);
+            border-radius: 8px;
         }
 
         .loading {
@@ -248,10 +250,10 @@
         .goal-form-row select,
         .goal-form-row input {
             padding: 8px;
-            border: 1px solid #98989d;
+            border: 1.5px solid var(--cc-charcoal);
             border-radius: 8px;
-            background: #fff6ee;
-            color: #313135;
+            background: var(--cc-page);
+            color: var(--cc-ink);
             font-size: 14px;
         }
 
@@ -280,7 +282,7 @@
         .consistency-percentage {
             font-size: 42px;
             font-weight: 700;
-            color: #313135;
+            color: var(--cc-charcoal);
             min-width: 110px;
         }
 
@@ -650,77 +652,92 @@
                 </div>
             </section>
 
-            <!-- ===== BEGIN TIKTOK SAMPLE PREVIEW (illustrative, frontend-only) =====
-                 Remove this whole block, the tiktok-sample-preview.js file and its
-                 <script> tag below to delete the preview. Figures are made up, are not
-                 fetched from the backend or TikTok, and are never part of real analytics. -->
-            <section class="analytics-card" id="tiktokSampleSection">
+            <!-- ===== BEGIN CROSS-PLATFORM SAMPLE COMPARISON (illustrative, frontend-only) =====
+                 Remove this block, the sample-comparison.js file and its <script> tag
+                 below to delete the feature. TikTok and Instagram figures are generated
+                 in the browser, are not fetched from the backend or either platform, and
+                 are never part of real analytics, totals, recommendations or goals. -->
+            <section class="analytics-card" id="crossPlatformSection">
                 <style>
-                    #tiktokSamplePanel[hidden] { display: none; }
-                    .tiktok-sample-disclaimer {
-                        margin: 12px 0;
-                        padding: 10px 12px;
-                        border: 1px dashed #98989d;
-                        border-radius: 8px;
-                        background: #fff;
-                        color: #4e1e17;
-                        font-size: 13px;
-                        line-height: 1.4;
+                    #crossPlatformSection [hidden] { display: none; }
+                    .xp-disclaimer {
+                        margin: 12px 0; padding: 10px 12px; border: 1px dashed #98989d;
+                        border-radius: 8px; background: var(--cc-blush); color: #4e1e17; font-size: 13px; line-height: 1.4;
                     }
-                    .tiktok-sample-num { text-align: right; white-space: nowrap; }
-                    .tiktok-sample-bars { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
-                    .tiktok-sample-bars-title { font-size: 13px; color: #7a6f6f; margin: 16px 0 0; }
-                    .tiktok-sample-bar-row {
-                        display: grid;
-                        grid-template-columns: minmax(110px, 200px) 1fr minmax(100px, auto);
-                        gap: 10px;
-                        align-items: center;
-                        font-size: 12px;
-                        color: #7a6f6f;
+                    .xp-status { margin: 12px 0; font-size: 13px; color: #7a6f6f; }
+                    .xp-num { text-align: right; white-space: nowrap; }
+                    .xp-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+                    .xp-badge--live { background: #e3f1e5; color: #1b6e2d; }
+                    .xp-badge--sample { background: #eeeeef; color: #4e4e53; border: 1px dashed #98989d; }
+                    /* Platform colours (same three looks as the pills in style.css). Sample badges keep a dashed edge. */
+                    .xp-badge--youtube { background: var(--cc-youtube); color: #fff; font-weight: 700; }
+                    .xp-badge--tiktok { background: var(--cc-tiktok-ink); color: #fff; font-weight: 700; box-shadow: inset 3px 0 0 var(--cc-tiktok-cyan), inset -3px 0 0 var(--cc-tiktok-pink); }
+                    .xp-badge--instagram { background: linear-gradient(90deg, var(--cc-insta-purple), var(--cc-insta-pink), var(--cc-insta-orange)); color: #fff; font-weight: 700; }
+                    .xp-badge--sample.xp-badge--tiktok, .xp-badge--sample.xp-badge--instagram { border: 1px dashed rgba(255,255,255,0.85); }
+                    .xp-row--sample td { background: #faf6f1; }
+                    .xp-row--none td { font-size: 12px; color: #7a6f6f; font-style: italic; }
+                    .xp-bars { margin-top: 16px; display: flex; flex-direction: column; gap: 6px; }
+                    .xp-bar-group { margin-top: 10px; }
+                    .xp-bar-heading { font-size: 13px; font-weight: 600; color: #4e1e17; }
+                    .xp-bar-row {
+                        display: grid; grid-template-columns: minmax(80px, 110px) 1fr minmax(100px, auto);
+                        gap: 10px; align-items: center; font-size: 12px; color: #7a6f6f;
                     }
-                    .tiktok-sample-bar-track { background: #f0e1d4; border-radius: 4px; height: 12px; overflow: hidden; }
-                    .tiktok-sample-bar-fill { background: #98989d; height: 100%; border-radius: 4px; }
-                    @media (max-width: 600px) {
-                        .tiktok-sample-bar-row { grid-template-columns: 1fr; gap: 4px; }
-                    }
+                    .xp-bar-track { background: #f0e1d4; border-radius: 4px; height: 12px; overflow: hidden; }
+                    .xp-bar-fill { background: #4e1e17; height: 100%; border-radius: 4px; }
+                    .xp-bar-fill--sample { background: repeating-linear-gradient(45deg, #98989d, #98989d 6px, #b9b9bd 6px, #b9b9bd 12px); }
+                    .xp-bar-fill--youtube { background: var(--cc-youtube); }
+                    .xp-bar-fill--tiktok { background: linear-gradient(90deg, var(--cc-tiktok-cyan), var(--cc-tiktok-pink)); }
+                    .xp-bar-fill--instagram { background: linear-gradient(90deg, var(--cc-insta-purple), var(--cc-insta-pink), var(--cc-insta-orange)); }
+                    /* Sample bars stay hatched so they still read as illustrative, now in the platform colours. */
+                    .xp-bar-fill--sample.xp-bar-fill--tiktok { background: repeating-linear-gradient(45deg, var(--cc-tiktok-cyan), var(--cc-tiktok-cyan) 6px, var(--cc-tiktok-pink) 6px, var(--cc-tiktok-pink) 12px); }
+                    .xp-bar-fill--sample.xp-bar-fill--instagram { background: repeating-linear-gradient(45deg, var(--cc-insta-purple), var(--cc-insta-purple) 6px, var(--cc-insta-orange) 6px, var(--cc-insta-orange) 12px); }
+                    .xp-unavailable-title { font-size: 13px; color: #7a6f6f; margin: 16px 0 4px; }
+                    #crossPlatformUnavailable ul { margin: 0; padding-left: 18px; font-size: 13px; color: #7a6f6f; }
+                    @media (max-width: 600px) { .xp-bar-row { grid-template-columns: 1fr; gap: 4px; } }
                 </style>
 
-                <h3>TikTok</h3>
-                <p>TikTok API access or approval is pending, so no live TikTok data is available. You can view a clearly labelled sample of the intended layout.</p>
-                <button type="button" id="tiktokSampleToggleBtn" class="quick-action-btn quick-action-btn--small"
-                        aria-expanded="false" aria-controls="tiktokSamplePanel">Show TikTok sample preview</button>
-
-                <div id="tiktokSamplePanel" hidden>
-                    <h3 style="margin-top:16px;">TikTok Preview — Sample Data</h3>
-                    <div class="tiktok-sample-disclaimer" role="note">
-                        Illustrative sample data only; these figures were not retrieved from TikTok. Live integration is pending API access or approval.
-                    </div>
-
-                    <div class="table-wrap">
-                        <table class="analytics-table">
-                            <thead>
-                                <tr>
-                                    <th>Sample content</th>
-                                    <th class="tiktok-sample-num">Sample views</th>
-                                    <th class="tiktok-sample-num">Sample likes</th>
-                                    <th class="tiktok-sample-num">Sample comments</th>
-                                </tr>
-                            </thead>
-                            <tbody id="tiktokSampleTableBody"></tbody>
-                        </table>
-                    </div>
-
-                    <p class="tiktok-sample-bars-title">Sample views by entry (illustrative)</p>
-                    <div class="tiktok-sample-bars" id="tiktokSampleBars"></div>
+                <h3>Cross-Platform Comparison</h3>
+                <p>YouTube, TikTok and Instagram for the same content items you scheduled across platforms.</p>
+                <p>
+                    <span class="xp-badge xp-badge--live xp-badge--youtube" id="crossPlatformYoutubeLegend">YouTube — Recorded Data</span>
+                    <span class="xp-badge xp-badge--sample xp-badge--tiktok">TikTok — Sample Data</span>
+                    <span class="xp-badge xp-badge--sample xp-badge--instagram">Instagram — Sample Data</span>
+                </p>
+                <div class="xp-disclaimer" role="note">
+                    TikTok and Instagram figures are illustrative samples for demonstration. They are not retrieved from
+                    TikTok or Instagram, no live connection exists for either platform, and they are not saved or included in
+                    your analytics totals, recommendations, goals or exports. They are derived from each item's YouTube
+                    figures using fixed assumptions.
                 </div>
+
+                <div id="crossPlatformStatus" class="xp-status" role="status" hidden></div>
+
+                <div class="table-wrap" id="crossPlatformTableWrap" hidden>
+                    <table class="analytics-table">
+                        <thead>
+                            <tr>
+                                <th>Content</th>
+                                <th>Data source</th>
+                                <th class="xp-num">Views</th>
+                                <th class="xp-num">Likes</th>
+                                <th class="xp-num">Comments</th>
+                            </tr>
+                        </thead>
+                        <tbody id="crossPlatformTableBody"></tbody>
+                    </table>
+                </div>
+
+                <div class="xp-bars" id="crossPlatformBars" aria-label="Views by platform (sample figures are illustrative)" hidden></div>
+                <div id="crossPlatformUnavailable"></div>
             </section>
-            <!-- ===== END TIKTOK SAMPLE PREVIEW ===== -->
+            <!-- ===== END CROSS-PLATFORM SAMPLE COMPARISON ===== -->
 
         </main>
     </div>
 </div>
 
 <script src="analytics.js"></script>
-<script src="tiktok-sample-preview.js"></script>
+<script src="sample-comparison.js"></script>
 </body>
 </html>

@@ -6,31 +6,9 @@
     <title>Mini Tutorial | ContentCreator</title>
     <link rel="stylesheet" href="style.css">
 
-    <!-- Tutorial-only styles, same palette as the rest of the app. Public
-         page: no auth-guard.js, no API calls. -->
+    <!-- Tutorial-only layout. Colours, buttons and the top bar come from
+         style.css. Public page: no auth-guard.js, no API calls. -->
     <style>
-        .tutorial-topbar {
-            background: #313135;
-            color: #fff6ee;
-            padding: 16px 24px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 12px;
-            flex-wrap: wrap;
-        }
-
-        .tutorial-topbar a {
-            color: #fff6ee;
-            text-decoration: none;
-            font-size: 14px;
-        }
-
-        .tutorial-topbar a:hover,
-        .tutorial-topbar a:focus-visible {
-            text-decoration: underline;
-        }
-
         .tutorial-page {
             max-width: 760px;
             margin: 0 auto;
@@ -39,12 +17,12 @@
 
         .tutorial-page h1 {
             margin: 0 0 8px;
-            font-size: 28px;
+            font-size: 30px;
         }
 
         .tutorial-intro {
             margin: 0 0 24px;
-            color: #7a6f6f;
+            color: var(--cc-muted);
             font-size: 15px;
             line-height: 1.5;
         }
@@ -56,18 +34,22 @@
             padding: 0;
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 18px;
         }
 
         .tutorial-step {
             counter-increment: step;
-            background: #fff6ee;
-            border: 1px solid #98989d;
+            background: var(--cc-page);
+            border: 1px solid var(--cc-blush);
+            border-left: 6px solid var(--cc-pink);
             border-radius: 8px;
-            padding: 18px 18px 18px 64px;
+            padding: 18px 18px 18px 68px;
             position: relative;
             cursor: default;
         }
+
+        .tutorial-step:nth-child(3n+2) { border-left-color: var(--cc-sage); }
+        .tutorial-step:nth-child(3n+3) { border-left-color: var(--cc-bluegrey); }
 
         .tutorial-step:hover {
             opacity: 1;
@@ -77,17 +59,17 @@
             content: counter(step);
             position: absolute;
             left: 18px;
-            top: 18px;
-            width: 30px;
-            height: 30px;
+            top: 16px;
+            width: 34px;
+            height: 34px;
             border-radius: 50%;
-            background: #313135;
-            color: #fff6ee;
+            background: var(--c-charcoal);
+            color: var(--cc-page);
             display: flex;
             align-items: center;
             justify-content: center;
             font-weight: bold;
-            font-size: 14px;
+            font-size: 15px;
         }
 
         .tutorial-step h2 {
@@ -95,34 +77,46 @@
             font-size: 18px;
         }
 
-        .tutorial-step p,
-        .tutorial-step li {
-            font-size: 14px;
-            line-height: 1.55;
-        }
-
         .tutorial-step p {
-            margin: 0 0 8px;
+            margin: 0 0 6px;
+            font-size: 14px;
+            line-height: 1.5;
         }
 
         .tutorial-step ul {
             list-style: disc;
-            margin: 0 0 8px;
+            margin: 0 0 10px;
             padding-left: 20px;
         }
 
         .tutorial-step li {
-            padding: 2px 0;
+            font-size: 14px;
+            line-height: 1.5;
+            padding: 3px 0;
             cursor: default;
+        }
+
+        .tutorial-step li::marker {
+            color: var(--c-charcoal);
         }
 
         .tutorial-step li:hover {
             opacity: 1;
         }
 
+        .tutorial-step ul ul {
+            margin: 4px 0 0;
+            list-style: circle;
+        }
+
         .tutorial-note {
-            color: #7a6f6f;
+            margin: 8px 0 0;
+            padding: 8px 12px;
+            border-left: 4px solid var(--cc-sage);
+            background: var(--cc-soft);
+            color: var(--cc-ink);
             font-size: 13px;
+            line-height: 1.45;
         }
 
         .tutorial-actions {
@@ -132,43 +126,16 @@
             margin-top: 28px;
         }
 
-        .tutorial-btn {
-            display: inline-block;
-            padding: 12px 24px;
-            border: 1.5px solid #313135;
-            border-radius: 8px;
-            color: #313135;
-            font-size: 15px;
-            text-decoration: none;
-            transition: 0.3s;
-        }
-
-        .tutorial-btn:hover,
-        .tutorial-btn:focus-visible {
-            background: #313135;
-            color: #fff6ee;
-        }
-
-        .tutorial-btn--primary {
-            background: #313135;
-            color: #fff6ee;
-        }
-
-        .tutorial-btn--primary:hover,
-        .tutorial-btn--primary:focus-visible {
-            background: transparent;
-            color: #313135;
-        }
-
-        .tutorial-btn:focus-visible {
-            outline: 3px solid #8D93CB;
-            outline-offset: 2px;
+        @media (max-width: 480px) {
+            .tutorial-step {
+                padding: 64px 16px 16px;
+            }
         }
     </style>
 </head>
 <body>
 
-<header class="tutorial-topbar">
+<header class="public-topbar">
     <a href="index.html">&larr; Back to welcome page</a>
     <a href="login.html">Sign In</a>
 </header>
@@ -182,43 +149,41 @@
     <ol class="tutorial-steps">
         <li class="tutorial-step">
             <h2>Sign in and open your dashboard</h2>
-            <p>
-                Choose <strong>Sign In</strong> on the welcome page. On the login form you can log in,
-                or switch to <strong>Register</strong> to create an account. After signing in you land
-                on your <strong>Dashboard</strong>.
-            </p>
-            <p>
-                If your creator profile isn't set up yet, you'll first be asked for a display name and
-                at least one content topic. The sidebar then takes you to the Dashboard, Content Planner,
-                Scripts and Analytics pages.
-            </p>
+            <ul>
+                <li>Choose <strong>Sign In</strong> on the welcome page.</li>
+                <li>On the login form, log in or switch to <strong>Register</strong> to create an account.</li>
+                <li>After signing in, you land on your <strong>Dashboard</strong>.</li>
+                <li>If your creator profile isn't set up yet, you'll first be asked for a display name and at least one content topic.</li>
+                <li>The sidebar then takes you to the Dashboard, Content Planner, Scripts and Analytics pages.</li>
+            </ul>
         </li>
 
         <li class="tutorial-step">
             <h2>Write and manage scripts</h2>
-            <p>
-                Open <strong>Scripts</strong> and choose <strong>Write Script</strong>. Give it a title,
-                write the script, pick a type (Short Form, Long Form or Carousel) and a status
-                (Draft, Filmed or Posted), then <strong>Save Script</strong>.
-            </p>
-            <p>
-                Back on the Scripts page you can filter by status, open a script to read it, edit it
-                or delete it.
-            </p>
+            <ul>
+                <li>Open <strong>Scripts</strong> and choose <strong>Write Script</strong>.</li>
+                <li>Give it a title and write the script.</li>
+                <li>Pick a type (Short Form, Long Form or Carousel) and a status (Draft, Filmed or Posted).</li>
+                <li>Choose <strong>Save Script</strong>.</li>
+                <li>Back on the Scripts page, you can filter by status, open a script to read it, edit it or delete it.</li>
+            </ul>
         </li>
 
         <li class="tutorial-step">
             <h2>Schedule content and use the calendar</h2>
-            <p>
-                In the <strong>Content Planner</strong>, choose <strong>+ Schedule Event</strong>. Enter a
-                title and a date, tick the platforms (TikTok, YouTube, Instagram), and optionally attach
-                a script. Then <strong>Save</strong>.
-            </p>
-            <p>
-                Click an item on the calendar to see its details. From there you can edit it,
-                <strong>Mark Published</strong> once it's live, unpublish it, or delete it. The filter
-                buttons show one platform at a time.
-            </p>
+            <ul>
+                <li>In the <strong>Content Planner</strong>, choose <strong>+ Schedule Event</strong>.</li>
+                <li>Enter a title and a date.</li>
+                <li>Tick the platforms:
+                    <span class="platform-badge platform-badge--tiktok">TikTok</span>
+                    <span class="platform-badge platform-badge--youtube">YouTube</span>
+                    <span class="platform-badge platform-badge--instagram">Instagram</span>
+                </li>
+                <li>Optionally attach a script, then choose <strong>Save</strong>.</li>
+                <li>Click an item on the calendar to see its details.</li>
+                <li>From there you can edit it, choose <strong>Mark Published</strong> once it's live, unpublish it, or delete it.</li>
+                <li>The filter buttons show one platform at a time.</li>
+            </ul>
             <p class="tutorial-note">
                 A scheduled item whose date passes without being marked Published is counted as Missed.
             </p>
@@ -229,32 +194,36 @@
             <p>The <strong>Analytics</strong> page has two separate posting measures:</p>
             <ul>
                 <li>
-                    <strong>Posting Goal Progress</strong>: choose <em>Set posting goal</em> to pick your own
-                    target (every day, a number of posts per week or per month, or a custom number and period).
-                    Progress compares the posts you actually published this period with that target.
-                    A goal is a target, not a schedule, so you don't have to schedule a post for every day.
+                    <strong>Posting Goal Progress</strong>
+                    <ul>
+                        <li>Choose <em>Set posting goal</em> to pick your own target: every day, a number of posts per week or per month, or a custom number and period.</li>
+                        <li>Progress compares the posts you actually published this period with that target.</li>
+                        <li>A goal is a target, not a schedule, so you don't have to schedule a post for every day.</li>
+                    </ul>
                 </li>
                 <li>
-                    <strong>Schedule Adherence</strong>: of the scheduled posts whose dates have passed,
-                    how many were published rather than missed.
+                    <strong>Schedule Adherence</strong>
+                    <ul>
+                        <li>Of the scheduled posts whose dates have passed, how many were published rather than missed.</li>
+                    </ul>
                 </li>
             </ul>
-            <p>
-                Performance numbers (views, likes, comments) and subscriber counts currently come from
-                YouTube only. Connect your YouTube channel on the Analytics page. To link a video, mark
-                its YouTube item as Published in the Content Planner, then use
-                <strong>Find YouTube Video</strong> and <strong>Sync Analytics</strong>.
-            </p>
+            <p>About performance data:</p>
+            <ul>
+                <li>Performance numbers (views, likes, comments) and subscriber counts currently come from YouTube only.</li>
+                <li>Connect your YouTube channel on the Analytics page.</li>
+                <li>To link a video, mark its YouTube item as Published in the Content Planner.</li>
+                <li>Then use <strong>Find YouTube Video</strong> and <strong>Sync Analytics</strong>.</li>
+            </ul>
         </li>
 
         <li class="tutorial-step">
             <h2>Check opportunities and recommendations</h2>
-            <p>
-                Your <strong>Dashboard</strong> can show <strong>Missed Opportunities</strong> and
-                <strong>Recommendations</strong>. For each one, choose <strong>Mark Actioned</strong> once
-                you've dealt with it, or <strong>Dismiss</strong> to clear it. The Creator Events section
-                lets you add events that can feed into these suggestions.
-            </p>
+            <ul>
+                <li>Your <strong>Dashboard</strong> can show <strong>Missed Opportunities</strong> and <strong>Recommendations</strong>.</li>
+                <li>For each one, choose <strong>Mark Actioned</strong> once you've dealt with it, or <strong>Dismiss</strong> to clear it.</li>
+                <li>The Creator Events section lets you add events that can feed into these suggestions.</li>
+            </ul>
             <p class="tutorial-note">
                 These lists only show something when the app has a suggestion for you, so they may be empty at first.
             </p>
@@ -262,8 +231,8 @@
     </ol>
 
     <div class="tutorial-actions">
-        <a class="tutorial-btn tutorial-btn--primary" href="login.html">Sign In</a>
-        <a class="tutorial-btn" href="index.html">Back to welcome page</a>
+        <a class="btn btn--primary" href="login.html">Sign In</a>
+        <a class="btn btn--secondary" href="index.html">Back to welcome page</a>
     </div>
 </main>
 

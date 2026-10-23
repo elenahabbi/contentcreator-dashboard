@@ -14,7 +14,7 @@ const els = {
     displayName: document.getElementById("displayName"),
     primaryNiche: document.getElementById("primaryNiche"),
     bio: document.getElementById("bio"),
-    topicInput: document.getElementById("topicInput"),
+    topicSelect: document.getElementById("topicSelect"),
     addTopicBtn: document.getElementById("addTopicBtn"),
     topicList: document.getElementById("topicList"),
     message: document.getElementById("message"),
@@ -22,6 +22,58 @@ const els = {
 };
 
 let topics = [];
+// Shared category list from GET /categories (the same source write.html uses).
+let categories = [];
+// A niche saved before dropdowns existed may not match any category. It is
+// kept (and shown as a legacy option) rather than silently dropped.
+let legacyNiche = "";
+
+function categoryKey(name) {
+    return String(name || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function renderNicheOptions(selectedValue) {
+    els.primaryNiche.textContent = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Select a niche…";
+    els.primaryNiche.appendChild(placeholder);
+    categories.forEach((c) => {
+        const opt = document.createElement("option");
+        opt.value = c.category_name;
+        opt.textContent = c.category_name;
+        els.primaryNiche.appendChild(opt);
+    });
+    const match = categories.find((c) => categoryKey(c.category_name) === categoryKey(selectedValue));
+    if (match) {
+        els.primaryNiche.value = match.category_name;
+    } else if (selectedValue) {
+        legacyNiche = selectedValue;
+        const opt = document.createElement("option");
+        opt.value = selectedValue;
+        opt.textContent = `${selectedValue} (custom, saved earlier)`;
+        els.primaryNiche.appendChild(opt);
+        els.primaryNiche.value = selectedValue;
+    }
+}
+
+// Topics already chosen are not offered again, so duplicates can't be picked.
+function renderTopicOptions() {
+    const taken = new Set(topics.map((t) => categoryKey(t.topic_name)));
+    els.topicSelect.textContent = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Select a topic…";
+    els.topicSelect.appendChild(placeholder);
+    categories
+        .filter((c) => !taken.has(categoryKey(c.category_name)))
+        .forEach((c) => {
+            const opt = document.createElement("option");
+            opt.value = String(c.category_id);
+            opt.textContent = c.category_name;
+            els.topicSelect.appendChild(opt);
+        });
+}
 
 function setMessage(text, kind) {
     els.message.textContent = text || "";
@@ -41,6 +93,7 @@ function renderTopics() {
         li.appendChild(btn);
         els.topicList.appendChild(li);
     });
+    renderTopicOptions();
 }
 
 async function api(path, options = {}) {
@@ -60,6 +113,15 @@ async function api(path, options = {}) {
 async function loadState() {
     els.loadError.classList.add("is-hidden");
     try {
+        const catRes = await api("/categories");
+        if (!catRes.ok || !Array.isArray(catRes.data)) {
+            els.loadErrorText.textContent = "We couldn't load the category list. Please try again.";
+            els.loadError.classList.remove("is-hidden");
+            els.formArea.classList.add("is-hidden");
+            return;
+        }
+        categories = catRes.data;
+
         const { ok, data } = await api("/profile");
         if (!ok) {
             // A failed request is NOT treated as "no profile" and never redirects.
@@ -73,9 +135,10 @@ async function loadState() {
             window.location.replace("dashboard.html");
             return;
         }
+        legacyNiche = "";
+        renderNicheOptions(data.profile ? data.profile.primary_niche : "");
         if (data.profile) {
             els.displayName.value = data.profile.display_name || "";
-            els.primaryNiche.value = data.profile.primary_niche || "";
             els.bio.value = data.profile.bio || "";
         }
         topics = data.topics || [];
@@ -93,19 +156,18 @@ async function loadState() {
 }
 
 async function addTopic() {
-    const name = els.topicInput.value.trim();
-    if (!name) { setMessage("Type a topic first.", "error"); return; }
+    const categoryId = els.topicSelect.value;
+    if (!categoryId) { setMessage("Select a topic first.", "error"); return; }
     els.addTopicBtn.disabled = true;
     try {
         const { ok, data } = await api("/profile/topics", {
             method: "POST",
-            body: JSON.stringify({ topic_name: name }),
+            body: JSON.stringify({ category_id: Number(categoryId) }),
         });
         if (!ok) { setMessage(data.message || "Could not add the topic.", "error"); return; }
         topics.push({ topic_id: data.topic_id, topic_name: data.topic_name });
         topics.sort((a, b) => a.topic_name.localeCompare(b.topic_name));
         renderTopics();
-        els.topicInput.value = "";
         setMessage("", "");
     } catch (err) {
         if (err.message !== "unauthenticated") setMessage("Could not reach the server.", "error");
@@ -160,7 +222,7 @@ async function finish() {
 }
 
 els.addTopicBtn.addEventListener("click", addTopic);
-els.topicInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTopic(); } });
+els.topicSelect.addEventListener("change", () => setMessage("", ""));
 els.finishBtn.addEventListener("click", finish);
 els.retryBtn.addEventListener("click", loadState);
 

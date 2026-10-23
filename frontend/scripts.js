@@ -60,21 +60,33 @@ function loadScripts() {
 }
 
 // --- CATEGORIES ---
-// Loads the fixed category list (GET /categories) and renders one
-// checkbox per category into #categoryChecklist. Only present on
+// Categories come from the shared `categories` table, narrowed to the ones
+// the creator chose in their profile (GET /categories/mine). Only present on
 // write.html; a no-op elsewhere.
-function loadCategoryOptions(selectedIds = []) {
+//
+// `selectedCategories` is the item's current [{category_id, category_name}]
+// list (edit mode). A saved category that is no longer in the creator's
+// profile stays visible and checked, marked as such, so it is never silently
+// dropped or swapped for a different one; the user can untick it.
+let categoriesLoaded = false;
+
+function loadCategoryOptions(selectedCategories = []) {
     const container = document.getElementById("categoryChecklist");
     if (!container) return Promise.resolve();
+    const note = document.getElementById("categoryNote");
+    if (note) note.textContent = "";
 
-    return fetch("http://localhost:3000/categories")
+    return fetch("http://localhost:3000/categories/mine", { credentials: "include" })
         .then(res => {
             if (!res.ok) throw new Error("Failed to fetch categories");
             return res.json();
         })
-        .then(categories => {
+        .then(data => {
+            const offered = Array.isArray(data) ? data : (data.categories || []);
+            const selectedIds = selectedCategories.map(c => c.category_id);
             container.innerHTML = "";
-            categories.forEach(cat => {
+
+            const addChip = (cat, suffix) => {
                 const label = document.createElement("label");
                 label.classList.add("category-chip");
 
@@ -84,17 +96,36 @@ function loadCategoryOptions(selectedIds = []) {
                 checkbox.checked = selectedIds.includes(cat.category_id);
 
                 label.appendChild(checkbox);
-                label.append(" " + cat.category_name);
+                label.append(" " + cat.category_name + (suffix || ""));
                 container.appendChild(label);
-            });
+            };
+
+            offered.forEach(cat => addChip(cat));
+
+            // Saved on this item but no longer offered by the profile.
+            selectedCategories
+                .filter(c => !offered.some(o => o.category_id === c.category_id))
+                .forEach(c => addChip(c, " (no longer in your profile)"));
+
+            if (note && !Array.isArray(data) && data.configured === false) {
+                note.textContent =
+                    "Showing all categories because no niche or topics are set in your profile yet.";
+            }
+            categoriesLoaded = true;
         })
-        .catch(err => console.error("Error loading categories:", err));
+        .catch(err => {
+            console.error("Error loading categories:", err);
+            categoriesLoaded = false;
+            container.textContent = "Categories could not be loaded. Existing categories will be left unchanged.";
+        });
 }
 
 // Reads the checked category_id values from #categoryChecklist as numbers.
+// Returns undefined (leave categories untouched) when the list never loaded,
+// so a failed load can't wipe an item's existing categories.
 function getSelectedCategoryIds() {
     const container = document.getElementById("categoryChecklist");
-    if (!container) return undefined; // categories weren't touched on this page
+    if (!container || !categoriesLoaded) return undefined;
     return Array.from(container.querySelectorAll("input[type=checkbox]:checked"))
         .map(el => Number(el.value));
 }
@@ -233,8 +264,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 const saveBtn = document.getElementById("saveScript");
                 if (saveBtn) saveBtn.textContent = "Update Script";
 
-                const selectedIds = (script.categories || []).map(c => c.category_id);
-                loadCategoryOptions(selectedIds);
+                loadCategoryOptions(script.categories || []);
             })
             .catch(err => console.error("Error loading script for edit:", err));
     } else if (document.querySelector(".longForm .preview")) {

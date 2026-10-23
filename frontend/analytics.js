@@ -673,7 +673,7 @@ function renderConsistencyPlatformTable() {
 
     tbody.innerHTML = platformConsistencyData.map(row => `
         <tr>
-            <td><span class="platform-pill">${escapeHTML(row.platform || "Unknown")}</span></td>
+            <td><span class="platform-pill ${platformPillClass(row.platform)}">${escapeHTML(row.platform || "Unknown")}</span></td>
             <td>${formatNumber(row.publishedCount)}</td>
             <td>${formatNumber(row.missedCount)}</td>
             <td>${row.consistencyPercentage === null ? "N/A" : formatPercent(row.consistencyPercentage)}</td>
@@ -739,7 +739,9 @@ function renderConsistencyTrendChart() {
             datasets: [{
                 label: "Schedule adherence %",
                 data: values,
-                backgroundColor: "#8D93CB",
+                backgroundColor: "#e8bfd1",
+                borderColor: "#4e1e17",
+                borderWidth: 1.5,
                 borderRadius: 4,
             }],
         },
@@ -762,7 +764,7 @@ function renderConsistencyTrendChart() {
                 y: {
                     beginAtZero: true,
                     max: 100,
-                    grid: { color: "#f0e1d4" },
+                    grid: { color: "#e9cfd3" },
                     ticks: {
                         color: "#7a6f6f",
                         callback: (value) => `${value}%`,
@@ -983,12 +985,12 @@ function renderSubscriberChart() {
             datasets: [{
                 label: "Subscribers",
                 data: subscribers,
-                borderColor: "#8D93CB",
-                backgroundColor: "rgba(141, 147, 203, 0.15)",
+                borderColor: "#CD201F",
+                backgroundColor: "rgba(205, 32, 31, 0.12)",
                 borderWidth: 2,
                 tension: 0.25,
                 pointRadius: 3,
-                pointBackgroundColor: "#8D93CB",
+                pointBackgroundColor: "#CD201F",
                 fill: true,
             }],
         },
@@ -1010,7 +1012,7 @@ function renderSubscriberChart() {
                 },
                 y: {
                     beginAtZero: false,
-                    grid: { color: "#f0e1d4" },
+                    grid: { color: "#e9cfd3" },
                     ticks: {
                         color: "#7a6f6f",
                         callback: (value) => formatCompactNumber(value),
@@ -1087,7 +1089,7 @@ function renderTrendChart() {
             datasets: [{
                 label: "Lifetime views recorded",
                 data: views,
-                backgroundColor: "#8D93CB",
+                backgroundColor: "#CD201F",
                 borderRadius: 4,
             }],
         },
@@ -1109,7 +1111,7 @@ function renderTrendChart() {
                 },
                 y: {
                     beginAtZero: true,
-                    grid: { color: "#f0e1d4" },
+                    grid: { color: "#e9cfd3" },
                     ticks: {
                         color: "#7a6f6f",
                         callback: (value) => formatCompactNumber(value),
@@ -1139,7 +1141,7 @@ function renderPlatformTable() {
 
     tbody.innerHTML = platformData.map(row => `
         <tr>
-            <td><span class="platform-pill">${escapeHTML(row.platform_name || "Unknown")}</span></td>
+            <td><span class="platform-pill ${platformPillClass(row.platform_name)}">${escapeHTML(row.platform_name || "Unknown")}</span></td>
             <td>${formatNumber(row.total_views)}</td>
             <td>${formatNumber(row.total_likes)}</td>
             <td>${formatNumber(row.total_comments)}</td>
@@ -1172,7 +1174,7 @@ function renderTopContent() {
             <div class="top-content-body">
                 <div class="top-content-title">${escapeHTML(item.content_title || "Untitled")}</div>
                 <div class="top-content-meta">
-                    <span class="platform-pill">${escapeHTML(item.platform_name || "Unknown")}</span>
+                    <span class="platform-pill ${platformPillClass(item.platform_name)}">${escapeHTML(item.platform_name || "Unknown")}</span>
                     ${formatNumber(item.views)} views ·
                     ${formatNumber(item.likes)} likes ·
                     ${formatNumber(item.comments)} comments
@@ -1207,7 +1209,7 @@ function renderMetricsTable() {
     tbody.innerHTML = metricsData.map(metric => `
         <tr>
             <td>${escapeHTML(metric.content_title || "Untitled")}</td>
-            <td><span class="platform-pill">${escapeHTML(metric.platform_name || "Unknown")}</span></td>
+            <td><span class="platform-pill ${platformPillClass(metric.platform_name)}">${escapeHTML(metric.platform_name || "Unknown")}</span></td>
             <td>${formatNumber(metric.views)}</td>
             <td>${formatNumber(metric.likes)}</td>
             <td>${formatNumber(metric.comments)}</td>
@@ -1460,6 +1462,12 @@ function formatDateTime(value) {
     const date = new Date(String(value).replace(" ", "T"));
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+
+// Phase 3: platform name -> modifier class for .platform-pill (colours live in style.css).
+function platformPillClass(name) {
+    const key = String(name || "").toLowerCase();
+    return ["youtube", "tiktok", "instagram"].includes(key) ? `platform-pill--${key}` : "";
 }
 
 function escapeHTML(value) {

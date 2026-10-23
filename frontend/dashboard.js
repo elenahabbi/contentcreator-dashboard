@@ -6,8 +6,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     loadPostsConsistency();
     loadGoalChart();
         loadDashboardSummary();
-    loadPlatformsForCompetitorForm();
-    setupAddCompetitorForm();
+    updateSamplePreviewBadges();
     loadEvents();
     setupEventForm();
 });
@@ -33,7 +32,7 @@ async function redirectIfOnboardingIncomplete() {
         console.warn("Could not check profile setup:", error.message);
         const note = document.createElement("div");
         note.setAttribute("role", "status");
-        note.style.cssText = "padding:8px 12px;background:#fff6e5;color:#4e1e17;font-size:13px;";
+        note.style.cssText = "padding:8px 12px;background:#fff6e5;color:#313135;font-size:13px;";
         note.textContent = "We couldn't check your profile setup right now. The dashboard is still available.";
         document.body.prepend(note);
     }
@@ -86,11 +85,15 @@ async function loadPostsConsistency() {
 // message instead.
 // ============================================
 
+// Phase 3: general dashboard metrics use the app palette (burgundy / dusty pink /
+// blue-grey). Platform colours are used only where a chart compares platforms.
+// Only colours changed here; the data and calculations are untouched.
 const DASH_CHART_COLORS = {
-    published: "#8D93CB",
-    target: "#98989d",
-    missed: "#d98c7a",
-    grid: "#f0e1d4",
+    published: "#313135",
+    target: "#bbc4cd",
+    missed: "#e8bfd1",
+    outline: "#313135",
+    grid: "#e9cfd3",
     text: "#7a6f6f",
 };
 
@@ -252,6 +255,8 @@ function renderGoalChart(data) {
                 datasets: [{
                     data: [published, target],
                     backgroundColor: [DASH_CHART_COLORS.published, DASH_CHART_COLORS.target],
+                    borderColor: DASH_CHART_COLORS.outline,
+                    borderWidth: 1.5,
                     borderRadius: 4,
                 }],
             },
@@ -339,8 +344,8 @@ function renderPublishedMissedChart(data) {
                 datasets: [{
                     data: [published, missed],
                     backgroundColor: [DASH_CHART_COLORS.published, DASH_CHART_COLORS.missed],
-                    borderColor: "#fff6ee",
-                    borderWidth: 2,
+                    borderColor: DASH_CHART_COLORS.outline,
+                    borderWidth: 1.5,
                 }],
             },
             options: {
@@ -376,9 +381,11 @@ async function loadDashboardSummary() {
     clearDashboardError();
 
     try {
-        const response = await fetch(`${API_BASE}/dashboard/summary`);
+        const response = await fetch(`${API_BASE}/dashboard/summary`, { credentials: "include" });
         if (!response.ok) {
             const body = await response.json().catch(() => ({}));
+            // "detail" is the real server-side cause (development only).
+            if (body.detail) console.error("Dashboard summary server detail:", body.code || "", body.detail);
             throw new Error(body.message || "Could not load the dashboard summary.");
         }
         const data = await response.json();
@@ -390,17 +397,10 @@ async function loadDashboardSummary() {
                 renderOpportunities(data.opportunities);
         renderRecommendations(data.recommendations);
         renderSectionErrors(data.sectionErrors);
-        renderCompetitorCount(data.competitorsTracked);
     } catch (error) {
         console.error("Dashboard summary load error:", error);
         showDashboardError(error.message || "Unable to load the dashboard. Please try again.");
     }
-
-    // The competitor list itself (name/platform/profile) isn't part of
-    // /dashboard/summary — only the count is, to keep that endpoint's
-    // response small. Load it separately from the existing GET
-    // /competitors route.
-    loadCompetitorList();
 }
 
 // ---- Content summary cards ----
@@ -434,7 +434,7 @@ function renderUpcomingContent(items) {
                 <div class="dashboard-upcoming-title">${escapeHTML(item.content_title || "Untitled")}</div>
                 <div class="dashboard-upcoming-meta">${formatDateTime(item.scheduled_date)}</div>
             </div>
-            <span class="platform-pill">${escapeHTML(item.platform_name || "Unknown")}</span>
+            <span class="platform-pill ${platformPillClass(item.platform_name)}">${escapeHTML(item.platform_name || "Unknown")}</span>
         </li>
     `).join("");
 }
@@ -457,8 +457,32 @@ function renderPlatformOverview(platforms) {
         badge.className = "platform-status-badge platform-status-badge--ok";
     }
 
-    // TikTok/Instagram badges are static in dashboard.html — no API for
-    // them exists yet, so there is nothing to fetch or render here.
+    // TikTok/Instagram have no live integration. Their badges say
+    // "Sample Data Preview" (static in dashboard.html); see
+    // updateSamplePreviewBadges() below.
+}
+
+// Downgrades a "Sample Data Preview" badge only when we positively know the
+// creator has nothing scheduled for that platform (so no sample exists).
+// Read-only GET of an existing endpoint; on any failure the static badge
+// text stays as it is. Never marks a platform as connected.
+async function updateSamplePreviewBadges() {
+    try {
+        const response = await fetch(`${API_BASE}/scheduled-content`, { credentials: "include" });
+        if (!response.ok) return;
+        const rows = await response.json();
+        if (!Array.isArray(rows)) return;
+
+        const usable = rows.filter(r => ["Scheduled", "Published"].includes(r.computed_status || r.status));
+        const has = name => usable.some(r => r.platform_name === name);
+
+        [["platformTiktokStatus", "TikTok"], ["platformInstagramStatus", "Instagram"]].forEach(([id, name]) => {
+            const badge = document.getElementById(id);
+            if (badge && !has(name)) badge.textContent = "No sample — nothing scheduled";
+        });
+    } catch (error) {
+        console.warn("Could not check scheduled content for sample badges:", error.message);
+    }
 }
 
 // ---- Recent performance snapshot ----
@@ -592,127 +616,6 @@ document.addEventListener("click", async (event) => {
         button.disabled = false;
     }
 });
-
-// ============================================
-// COMPETITORS
-// The dashboard summary only returns a count (renderCompetitorCount,
-// below). The list itself, the add-competitor form, and the platform
-// dropdown all use the existing GET/POST /competitors and GET
-// /platforms routes directly — no new backend endpoints were needed.
-// ============================================
-
-function renderCompetitorCount(count) {
-    setText("competitorCount", formatNumber(count || 0));
-}
-
-async function loadPlatformsForCompetitorForm() {
-    const select = document.getElementById("competitorPlatform");
-    if (!select) return;
-    try {
-        const response = await fetch(`${API_BASE}/platforms`);
-        if (!response.ok) throw new Error("Request failed");
-        const platforms = await response.json();
-        for (const platform of platforms) {
-            const option = document.createElement("option");
-            option.value = platform.platform_id;
-            option.textContent = platform.platform_name;
-            select.appendChild(option);
-        }
-    } catch (error) {
-        console.error("Could not load platforms for competitor form:", error);
-    }
-}
-
-async function loadCompetitorList() {
-    const list = document.getElementById("competitorList");
-    const empty = document.getElementById("competitorEmpty");
-    if (!list) return;
-
-    try {
-        const response = await fetch(`${API_BASE}/competitors`);
-        if (!response.ok) throw new Error("Request failed");
-        const competitors = await response.json();
-
-        if (!Array.isArray(competitors) || competitors.length === 0) {
-            list.innerHTML = "";
-            if (empty) empty.classList.remove("is-hidden");
-            return;
-        }
-        if (empty) empty.classList.add("is-hidden");
-
-        list.innerHTML = competitors.map(c => `
-            <li class="dashboard-competitor-item">
-                <span>
-                    <strong>${escapeHTML(c.name)}</strong>
-                    <span class="platform-pill">${escapeHTML(c.platform_name)}</span>
-                </span>
-                <button class="quick-action-btn quick-action-btn--small" data-competitor-id="${c.competitor_id}">Remove</button>
-            </li>
-        `).join("");
-    } catch (error) {
-        console.error("Could not load competitors:", error);
-        list.innerHTML = "";
-    }
-}
-
-function setupAddCompetitorForm() {
-    const form = document.getElementById("addCompetitorForm");
-    if (!form) return;
-
-    form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const nameInput = document.getElementById("competitorName");
-        const platformInput = document.getElementById("competitorPlatform");
-        const urlInput = document.getElementById("competitorUrl");
-        const errorEl = document.getElementById("competitorFormError");
-        if (errorEl) { errorEl.classList.add("is-hidden"); errorEl.textContent = ""; }
-
-        try {
-            const response = await fetch(`${API_BASE}/competitors`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    name: nameInput.value.trim(),
-                    platform_id: platformInput.value,
-                    profile_url: urlInput.value.trim() || null,
-                }),
-            });
-            if (!response.ok) {
-                const body = await response.json().catch(() => ({}));
-                throw new Error(body.message || "Could not add competitor.");
-            }
-            form.reset();
-            // Refreshes both the competitor list and the summary count
-            // (and re-runs opportunity detection, since a new competitor
-            // can immediately surface new opportunities).
-            loadDashboardSummary();
-        } catch (error) {
-            console.error("Could not add competitor:", error);
-            if (errorEl) { errorEl.textContent = error.message || "Could not add competitor."; errorEl.classList.remove("is-hidden"); }
-        }
-    });
-
-    // Delegated remove-competitor click handler.
-    document.getElementById("competitorList")?.addEventListener("click", async (event) => {
-        const button = event.target.closest("button[data-competitor-id]");
-        if (!button) return;
-        const id = button.dataset.competitorId;
-        button.disabled = true;
-        try {
-            const response = await fetch(`${API_BASE}/competitors/${id}`, { method: "DELETE" });
-            if (!response.ok) {
-                const body = await response.json().catch(() => ({}));
-                throw new Error(body.message || "Could not remove competitor.");
-            }
-            loadCompetitorList();
-            loadDashboardSummary();
-        } catch (error) {
-            console.error(`Could not remove competitor ${id}:`, error);
-            showDashboardError(error.message || "Could not remove competitor.");
-            button.disabled = false;
-        }
-    });
-}
 
 // ============================================
 // ERROR BANNER
@@ -972,6 +875,12 @@ function formatDateTime(value) {
     const date = new Date(String(value).replace(" ", "T"));
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+
+// Phase 3: platform name -> modifier class for .platform-pill (colours live in style.css).
+function platformPillClass(name) {
+    const key = String(name || "").toLowerCase();
+    return ["youtube", "tiktok", "instagram"].includes(key) ? `platform-pill--${key}` : "";
 }
 
 function escapeHTML(value) {
